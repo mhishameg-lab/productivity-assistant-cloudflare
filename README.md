@@ -51,14 +51,15 @@ webhook points to the Worker. Keep Apps Script available as a rollback target.
   Guided `/weekly` reflection saves the five playbook questions in D1;
   `/monthly` records a project decision, reason, and future review date without
   calling Trello. Scheduled numerical weekly/monthly snapshots and Gmail report
-  delivery are implemented behind disabled-by-default gates.
+  delivery are implemented. Production scheduled messages, Calendar access, and
+  Gmail reports are enabled; email escalations remain separately disabled.
 - `wrangler.toml` binds staging and production to separate D1 databases.
   Production is deployed at
   `https://productivity-assistant-production.mhisham-eg.workers.dev`, with
-  `ASSISTANT_ENABLED = "true"`. Scheduled jobs and Calendar/Gmail integrations
-  remain disabled.
-- When explicitly enabled in a validated non-production staging environment,
-  the single Cron handler sends the 07:30 briefing, 14:15 work briefing, 23:00
+  `ASSISTANT_ENABLED = "true"`. Scheduled prompts, Calendar reads and
+  user-requested Calendar blocks, and Gmail reports are enabled.
+- When `SCHEDULED_JOBS_ENABLED` is true in staging or production, the single
+  Cron handler sends the 07:30 briefing, 14:15 work briefing, 23:00
   shutdown, 23:20 five-question planning prompt, and 00:00/00:20/00:45
   confirmation checkpoints in `Africa/Cairo`. It also prepares weekly Friday
   and previous-month reports at 18:00 Cairo, and checks eligible high-priority
@@ -116,14 +117,10 @@ been independently inspected.
 1. Verify the Cloudflare account's current free-tier usage;
    account-level usage has not been inspected, so cost compliance is not yet
    certified.
-2. Verify Google OAuth authorization and scopes for the configured credentials.
-   The Tasks REST client can refresh configured credentials; Google Tasks needs
-   `https://www.googleapis.com/auth/tasks`. Current Calendar reads require
-   `https://www.googleapis.com/auth/calendar.events.readonly`. Task-block
-   creation additionally requires `https://www.googleapis.com/auth/calendar.events`
-   and `GOOGLE_CALENDAR_WRITES_ENABLED = "true"`. Gmail reports require
-   `https://www.googleapis.com/auth/gmail.send`; email escalation remains
-   disabled until its policy and recipient are validated.
+2. Verify the configured Google OAuth credentials grant the enabled Tasks,
+   Calendar read/write, and Gmail send scopes through real production actions.
+   The integration gates are enabled, but OAuth permissions have not been
+   independently introspected here.
 3. Keep Apps Script available for rollback. Telegram's webhook is configured
    for `https://productivity-assistant-production.mhisham-eg.workers.dev/webhooks/telegram`.
 
@@ -176,22 +173,22 @@ repository. Configure secrets separately for the production Worker:
 - D1 binding `DB`.
 - Production Worker variable `ASSISTANT_ENABLED` is `"true"`; staging remains
   disabled.
-- Worker variable `SCHEDULED_JOBS_ENABLED` is currently `"false"` to keep
-  scheduled messages disabled during initial cutover.
+- Production `SCHEDULED_JOBS_ENABLED` is `"true"`; staging remains disabled.
 - Worker variable `DEPLOYMENT_STAGE` is `"staging"` for the default deployment
   and `"production"` in the production environment.
 - Worker secrets `TELEGRAM_WEBHOOK_SECRET` and `TELEGRAM_BOT_TOKEN`.
 - `AUTHORIZED_TELEGRAM_USER_ID` and `GOOGLE_TASK_LIST_ID`.
-- `GOOGLE_CALENDAR_ENABLED` must remain `"false"` until Calendar OAuth access
-  is authorized and validated. `GOOGLE_CALENDAR_ID` is optional; the client
-  defaults to `primary`.
-- `GOOGLE_CALENDAR_WRITES_ENABLED` must remain `"false"` until Calendar event
-  write access has been separately authorized and validated.
-- `GOOGLE_GMAIL_ENABLED` and `EMAIL_ESCALATIONS_ENABLED` remain `"false"` until
-  Gmail scopes and a verified `PRODUCTIVITY_EMAIL_RECIPIENT` are configured.
+- Production `GOOGLE_CALENDAR_ENABLED` and
+  `GOOGLE_CALENDAR_WRITES_ENABLED` are `"true"`. Calendar events are created
+  only after an explicit user action; no automatic event creation is enabled.
+  `GOOGLE_CALENDAR_ID` is optional; the client defaults to `primary`.
+- Production `GOOGLE_GMAIL_ENABLED` is `"true"` for scheduled review reports.
+  `EMAIL_ESCALATIONS_ENABLED` remains `"false"` until the recipient and
+  escalation policy are confirmed.
 - Set `PRODUCTIVITY_EMAIL_RECIPIENT` directly as a Cloudflare Worker variable;
-  it is intentionally not stored in source. `EMAIL_ESCALATION_HOURS` is a D1
-  setting and defaults to 24.
+  it is intentionally not stored in source. Scheduled email reports are skipped
+  with a system warning if this recipient is not configured. `EMAIL_ESCALATION_HOURS`
+  is a D1 setting and defaults to 24.
 - Google OAuth secrets `GOOGLE_OAUTH_CLIENT_ID`,
   `GOOGLE_OAUTH_CLIENT_SECRET`, and `GOOGLE_OAUTH_REFRESH_TOKEN`.
 
