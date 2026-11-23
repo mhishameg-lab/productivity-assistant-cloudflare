@@ -1,14 +1,39 @@
 import {
   appendFocusOutcomeStatus,
+  listOverdueTaskMirrors,
   listPendingTaskMirrors,
+  listPendingTaskPlanningCandidates,
   syncGoogleTaskMirrors,
   upsertGoogleTaskMirror
 } from "../db/google-tasks-repository.js";
+import {
+  createGoal,
+  getGoal,
+  getGoalKeyResult,
+  getGoalKeyResults,
+  getGoalProjects,
+  getGoalTaskLinks,
+  linkGoalTask,
+  listDailyGoalFocus,
+  listGoalParents,
+  listGoals,
+  updateGoalKeyResult
+} from "../db/goal-repository.js";
+import {
+  listManualAccountabilityCheckins,
+  recordManualAccountabilityCheckin
+} from "../db/accountability-repository.js";
+import {
+  getDailyFocusRecommendation,
+  recordAiRecommendationDecision,
+  saveDailyFocusRecommendation
+} from "../db/ai-recommendation-repository.js";
 import {
   clearConversationState,
   getConversationState,
   getTaskCreationRequest,
   logSyncEvent,
+  logSystemEvent,
   setConversationState,
   startTaskCreationRequest,
   updateTaskCreationRequest
@@ -20,7 +45,26 @@ import {
   recordFocusSession,
   releaseFocusSessionResponse
 } from "../scheduled.js";
-import { resolveIntent } from "./intent.js";
+import { buildDailyTaskPlan, formatDailyTaskPlan } from "./daily-planner.js";
+import { cairoLocalDateTimeToIso } from "../integrations/google-calendar.js";
+import {
+  resolveAvailableTimeRequest,
+  resolveDeterministicTextIntent,
+  resolveIntent
+} from "./intent.js";
+import {
+  areaLabel,
+  cairoDateKey as formattedCairoDateKey,
+  cairoTimeParts,
+  longDate,
+  parseCairoDateTime,
+  parseDateInput,
+  parseTimeInput,
+  shortDate,
+  dateTimeLabel,
+  timeLabel
+} from "./format.js";
+import { getDisplayName, say } from "./voice.js";
 
 export async function handleAssistantMessage({
   db,
@@ -28,11 +72,18 @@ export async function handleAssistantMessage({
   message,
   googleTasks,
   googleCalendar = null,
+  googleGmail = null,
+  naturalLanguageClassifier = null,
+  aiDailyPlanner = null,
+  emailFollowUpAnalyzer = null,
   now
 }) {
-  const intent = resolveIntent(message);
+  let intent = resolveIntent(message);
   if (intent.type === "user_action") {
-    return handleAction({ db, user, message, intent, googleTasks, googleCalendar, now });
+    return handleAction({
+      db, user, message, intent, googleTasks, googleCalendar, googleGmail,
+      aiDailyPlanner, now
+    });
   }
 
   if (intent.type === "unknown_command") {
@@ -43,16 +94,79 @@ export async function handleAssistantMessage({
     const state = await getConversationState(db, user.id, now.toISOString());
     if (state) {
       return handleConversationText({
-        db, user, message, state, googleTasks, googleCalendar, now
+        db, user, message, state, googleTasks, googleCalendar, aiDailyPlanner, now
       });
     }
-    return response("Message", "Use /addtask to capture a next action, or /help to see the control panel.");
+    if (/^▶\s*Next$/i.test(intent.text.trim())) {
+      return showNextRecommendation({ db, user, now });
+    }
+    if (/^🗓\s*Plan$/i.test(intent.text.trim())) {
+      return showPlanForDate({
+        db, user, googleTasks, googleCalendar,
+        date: cairoDateKey(now), title: "Plan today", now
+      });
+    }
+    if (/^➕\s*Add$/i.test(intent.text.trim())) {
+      return beginTaskCapture(db, user, now);
+    }
+    if (/^📋\s*Today$/i.test(intent.text.trim())) {
+      return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
+    }
+    const shortcut = parseTypedShortcut(intent.text);
+    if (shortcut) {
+      return beginShortcutFocus({
+        db,
+        user,
+        area: shortcut.area,
+        duration: shortcut.duration,
+        googleTasks,
+        now
+      });
+    }
+    const quickTask = parseQuickCapture(intent.text, now);
+    if (quickTask) {
+      return createQuickCapturedTask({
+        db,
+        user,
+        googleTasks,
+        capture: quickTask,
+        now
+      });
+    }
+    const availability = resolveAvailableTimeRequest(intent.text);
+    if (availability) {
+      return beginAvailableTimeRequest({
+        db, user, minutes: availability.minutes, now
+      });
+    }
+    const deterministicName = resolveDeterministicTextIntent(intent.text);
+    if (deterministicName) {
+      intent = { type: "command", name: deterministicName, arguments: "" };
+    } else if (naturalLanguageClassifier) {
+      try {
+        const name = await naturalLanguageClassifier(intent.text);
+        if (name && name !== "unknown") {
+          intent = { type: "command", name, arguments: "" };
+        }
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: "ai_intent_classification_failed",
+          errorType: error && error.name || "Error"
+        }));
+      }
+    }
+    if (intent.type === "user_message") {
+      return response(
+        "Message",
+        "I couldn't safely match that request to an available action. Try a direct command or /help."
+      );
+    }
   }
 
   switch (intent.name) {
     case "start":
     case "today":
-      return showHome({ db, googleTasks, googleCalendar, now });
+      return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
     case "help":
       return {
         category: "Control panel",
@@ -61,19 +175,27 @@ export async function handleAssistantMessage({
           heading: "",
           lines: [
             "Plan my day",
+            "Review overdue tasks",
+            "Review unread inbox",
+            "Trello / Obsidian check-in",
+            "Review goals",
             "Add a task",
             "Focus now",
+            "Plan a free-time window",
             "Review progress",
             "Capture an idea",
             "Weekly review",
             "Monthly project decision",
             "Settings",
-            "Shortcuts: /today · /tasks · /addtask · /weekly · /monthly"
+            "Shortcuts: /today · /available 90 · /tasks · /overdue · /inbox · /accountability · /goals · /goal · /addtask · /weekly · /monthly"
           ]
         }],
         actions: [[
           { label: "Add a task", action: "add_task" },
           { label: "Show tasks", action: "show_tasks" }
+        ], [
+          { label: "Review goals", action: "goals_show" },
+          { label: "Create a goal", action: "goal_new" }
         ], [
           { label: "Weekly review", action: "weekly_start" },
           { label: "Monthly project", action: "monthly_project_review" }
@@ -81,9 +203,20 @@ export async function handleAssistantMessage({
       };
     case "tasks":
       return showTasks({ db, googleTasks, now });
+    case "overdue":
+      return showOverdueTasks({ db, googleTasks, now });
+    case "inbox":
+      return showInboxTriage({ db, googleGmail, emailFollowUpAnalyzer, now });
+    case "accountability":
+      return showManualAccountabilityCheckin({ db, now });
+    case "goals":
+      return showGoals({ db, user });
+    case "goal":
+      return beginGoalCapture(db, user, now);
     case "tomorrow":
       return showPlanForDate({
         db,
+        user,
         googleTasks,
         googleCalendar,
         date: shiftDateKey(cairoDateKey(now), 1),
@@ -96,8 +229,29 @@ export async function handleAssistantMessage({
       return beginMonthlyProjectReview({ db, user, now });
     case "addtask":
       return beginTaskCapture(db, user, now);
+    case "available": {
+      const minutes = intent.arguments.trim()
+        ? Number(intent.arguments.trim())
+        : null;
+      return beginAvailableTimeRequest({ db, user, minutes, now });
+    }
     case "focus":
       return beginFocusNow({ db, user, now });
+    case "quiet": {
+      const duration = parseQuietDuration(intent.arguments);
+      if (!duration) return response("Quiet time", "Use /quiet 2h.");
+      await setConversationState(db, user.id, {
+        type: "quiet",
+        mutedUntil: new Date(now.getTime() + duration * 60_000).toISOString()
+      }, now.toISOString());
+      await db.prepare(
+        `INSERT OR REPLACE INTO settings (setting_key, setting_value, description, category, updated_at)
+         VALUES ('pulse_muted_until', ?1, 'Proactive pulse mute expiry', 'Pulses', ?2)`
+      ).bind(new Date(now.getTime() + duration * 60_000).toISOString(), now.toISOString()).run();
+      return response("Quiet mode", `Pulses and care notes are muted for ${duration >= 60 ? `${duration / 60} hour${duration === 60 ? "" : "s"}` : `${duration} minutes`}.`);
+    }
+    case "pulses":
+      return showPulseStatus(db, user.id, now);
     default:
       return response(
         "Migration status",
@@ -106,10 +260,90 @@ export async function handleAssistantMessage({
   }
 }
 
-async function handleAction({ db, user, message, intent, googleTasks, googleCalendar, now }) {
+async function handleAction({
+  db,
+  user,
+  message,
+  intent,
+  googleTasks,
+  googleCalendar,
+  googleGmail,
+  aiDailyPlanner,
+  now
+}) {
   const identifier = intent.identifier;
-  if (identifier === "home") return showHome({ db, googleTasks, googleCalendar, now });
+  if (identifier === "home") {
+    return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
+  }
+  if (identifier.startsWith("pulse|")) {
+    return handlePulseAction({ db, user, identifier, googleTasks, now });
+  }
+  const aiPlan = identifier.match(/^ai_daily_plan\|(\d{4}-\d{2}-\d{2})$/);
+  if (aiPlan) {
+    return showAiDailyPrioritySuggestion({
+      db, user, googleTasks, aiDailyPlanner, date: aiPlan[1], now
+    });
+  }
+  const aiDecision = identifier.match(/^ai_recommendation\|(AI-REC-[A-Za-z0-9-]{1,48})\|(accepted|rejected)$/);
+  if (aiDecision) {
+    const decision = aiDecision[2] === "accepted" ? "Accepted" : "Rejected";
+    const saved = await recordAiRecommendationDecision(
+      db,
+      user.id,
+      aiDecision[1],
+      decision,
+      now.toISOString()
+    );
+    if (!saved) {
+      return response("Recommendation unavailable", "Open today's plan to review the current recommendation.");
+    }
+    return response(
+      "Recommendation response recorded",
+      `Recorded as ${decision.toLowerCase()}. No task status, due date, or calendar event was changed.`
+    );
+  }
   if (identifier === "show_tasks") return showTasks({ db, googleTasks, now });
+  const gmailDismiss = identifier.match(/^gmail_followup_dismiss\|([A-Za-z0-9_-]{1,32})$/);
+  if (gmailDismiss) {
+    return response(
+      "Email follow-up dismissed",
+      "No task was created and the email was not changed."
+    );
+  }
+  const gmailFollowUp = identifier.match(/^gmail_followup_task\|([A-Za-z0-9_-]{1,32})$/);
+  if (gmailFollowUp) {
+    if (!googleTasks || !googleGmail) {
+      return response(
+        "Email task unavailable",
+        "Gmail and Google Tasks must both be connected. No task was created."
+      );
+    }
+    const thread = await googleGmail.getThreadSummary(gmailFollowUp[1]);
+    if (!thread) {
+      return response(
+        "Email conversation unavailable",
+        "I couldn't verify that Gmail conversation. No task was created."
+      );
+    }
+    return createCapturedTask({
+      db,
+      user,
+      state: {
+        requestId: `TASK-GMAIL-${thread.threadId}`,
+        title: `Follow up: ${truncate(thread.subject || "(no subject)", 160)}`,
+        area: "Admin",
+        priority: "Medium",
+        dueDate: "",
+        doneTest: "Review the email thread and complete or define the requested next step."
+      },
+      addToTop3: false,
+      googleTasks,
+      now,
+      clearConversation: false
+    });
+  }
+  if (identifier === "goals_show") return showGoals({ db, user });
+  if (identifier === "goal_new") return beginGoalCapture(db, user, now);
   if (identifier === "add_task") return beginTaskCapture(db, user, now);
   if (identifier === "focus_now") return beginFocusNow({ db, user, now });
   if (identifier === "plan_next_day_now") return beginNextDayPlanning({ db, user, now });
@@ -117,6 +351,7 @@ async function handleAction({ db, user, message, intent, googleTasks, googleCale
     return {
       ...(await showPlanForDate({
         db,
+        user,
         googleTasks,
         googleCalendar,
         date: cairoDateKey(now),
@@ -129,6 +364,66 @@ async function handleAction({ db, user, message, intent, googleTasks, googleCale
         [{ label: "Back to home", action: "home" }]
       ]
     };
+  }
+  const reminderLater = identifier.match(/^task_reminder_later\|([^|]+)$/);
+  if (reminderLater) {
+    const updated = await db.prepare(
+      `UPDATE reminder_history
+          SET user_response = 'Postponed', confirmed_at = ?1
+        WHERE related_record_id = (
+            SELECT related_record_id FROM reminder_history
+             WHERE id = ?2 AND category = 'Overdue task'
+               AND delivery_status = 'Sent'
+          )
+          AND category = 'Overdue task' AND delivery_status = 'Sent'
+          AND user_response IS NULL
+        RETURNING id`
+    ).bind(now.toISOString(), reminderLater[1]).first();
+    return updated
+      ? response("Reminder deferred", "The task remains open. This reminder is deferred until the next eligible daily check.")
+      : response("Reminder already handled", "That reminder has already been answered.");
+  }
+  const calendarReminderResponse = identifier.match(
+    /^cal_(prepared|dismissed)\|(CALREM-[0-9a-f-]{36})$/
+  );
+  if (calendarReminderResponse) {
+    const userResponse = calendarReminderResponse[1] === "prepared"
+      ? "Prepared"
+      : "Dismissed";
+    const updated = await db.prepare(
+      `UPDATE reminder_history
+          SET user_response = ?1, confirmed_at = ?2
+        WHERE id = ?3 AND category = 'Calendar appointment'
+          AND delivery_status = 'Sent' AND user_response IS NULL
+        RETURNING id`
+    ).bind(userResponse, now.toISOString(), calendarReminderResponse[2]).first();
+    return updated
+      ? response(
+          "Appointment reminder updated",
+          userResponse === "Prepared"
+            ? "Marked prepared. No Calendar event or task was changed."
+            : "Reminder dismissed. No Calendar event or task was changed."
+        )
+      : response("Reminder already handled", "That appointment reminder has already been answered.");
+  }
+  const accountability = identifier.match(/^accountability_(done|missed)\|(ROUTINE-(?:TRELLO|OBSIDIAN))$/);
+  if (accountability) {
+    const routineId = accountability[2];
+    const status = accountability[1] === "done" ? "Completed" : "Missed";
+    await recordManualAccountabilityCheckin(
+      db,
+      routineId,
+      status,
+      cairoDateKey(now),
+      now.toISOString()
+    );
+    const label = routineId === "ROUTINE-TRELLO" ? "Trello" : "Obsidian";
+    return response(
+      "Manual accountability check-in",
+      status === "Completed"
+        ? `Recorded: ${label} updated today.`
+        : `Recorded: ${label} was not updated today. No external service was changed.`
+    );
   }
   const planConfirmation = identifier.match(/^(?:plan_confirm_today|plan_confirm_date\|(\d{4}-\d{2}-\d{2}))$/);
   if (planConfirmation) {
@@ -166,6 +461,132 @@ async function handleAction({ db, user, message, intent, googleTasks, googleCale
   }
   if (identifier === "weekly_start") return beginWeeklyReview({ db, user, now });
   if (identifier === "monthly_project_review") return beginMonthlyProjectReview({ db, user, now });
+  if (identifier === "goal_cancel") {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "goal_confirm") {
+      return response("Goal interview expired", "Start again with /goal when you are ready.");
+    }
+    await clearConversationState(db, user.id);
+    return response("Goal not saved", "The objective was not added.");
+  }
+  if (identifier === "goal_link_cancel") {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (state && state.type === "goal_task_link") await clearConversationState(db, user.id);
+    return response("Task linking cancelled", "No task was linked.");
+  }
+  if (identifier === "goal_save") {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "goal_confirm") {
+      return response("Goal interview expired", "Start again with /goal when you are ready.");
+    }
+    const goalId = await createGoal(db, user.id, state.goal, now.toISOString());
+    await clearConversationState(db, user.id);
+    return showGoalDetails({ db, user, goalId, googleTasks });
+  }
+  const goalLevel = identifier.match(/^goal_level\|(life_vision|annual|quarterly|monthly|weekly)$/);
+  if (goalLevel) {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "goal_level") {
+      return response("Goal interview expired", "Start again with /goal when you are ready.");
+    }
+    state.level = goalLevel[1];
+    const parents = await listGoalParents(db, user.id, state.level);
+    if (parents.length) {
+      state.type = "goal_parent";
+      await setConversationState(db, user.id, state, now.toISOString());
+      return {
+        category: "Goal setup",
+        title: "Link a parent objective?",
+        sections: [{
+          heading: "",
+          lines: ["This is optional. Choose the active objective this goal supports, or continue without a parent."]
+        }],
+        actions: [
+          ...parents.map(parent => [{
+            label: `${parent.title.slice(0, 40)}`,
+            action: `goal_parent|${parent.id}`
+          }]),
+          [{ label: "Continue without parent", action: "goal_parent|skip" }]
+        ]
+      };
+    }
+    state.type = "goal_category";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Choose a category", "For example: Work, Health, Learning, Finance, or Relationships.", "Category or skip");
+  }
+  if (identifier.startsWith("goal_parent|")) {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "goal_parent") {
+      return response("Goal interview expired", "Start again with /goal when you are ready.");
+    }
+    const parentId = identifier.slice("goal_parent|".length);
+    if (parentId !== "skip") {
+      const parents = await listGoalParents(db, user.id, state.level);
+      if (!parents.some(parent => parent.id === parentId)) {
+        return response("Parent objective unavailable", "Choose one of the listed active parent objectives or continue without one.");
+      }
+      state.parentGoalId = parentId;
+    }
+    state.type = "goal_category";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Choose a category", "For example: Work, Health, Learning, Finance, or Relationships.", "Category or skip");
+  }
+  if (identifier === "goal_add_key_result") {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "goal_more_key_results") {
+      return response("Goal interview expired", "Start again with /goal when you are ready.");
+    }
+    state.type = "goal_key_result";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion(
+      `Key result ${state.keyResults.length + 1}`,
+      "Describe a measurable result as: Measure | baseline | target | unit. Example: Weekly workouts | 0 | 3 | sessions.",
+      "Measure | baseline | target | unit"
+    );
+  }
+  if (identifier === "goal_finish_key_results") {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "goal_more_key_results" || !state.keyResults.length) {
+      return response("Add a key result first", "A goal needs at least one measurable key result.");
+    }
+    state.type = "goal_next_action";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Choose the next action", "What is the smallest concrete step that moves this objective forward?", "One next action");
+  }
+  const goalLinkStart = identifier.match(/^goal_link_start\|(GOAL-[A-Za-z0-9-]{1,48})$/);
+  if (goalLinkStart) return beginGoalTaskLink({ db, user, googleTasks, goalId: goalLinkStart[1], now });
+  const goalLinkTask = identifier.match(/^goal_select_task\|(TASK-[A-Za-z0-9-]{1,48})$/);
+  if (goalLinkTask) {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "goal_task_link") {
+      return response("Task selection expired", "Open the objective again to link a task.");
+    }
+    const linked = await linkGoalTask(db, user.id, state.goalId, goalLinkTask[1], now.toISOString());
+    await clearConversationState(db, user.id);
+    if (!linked) {
+      return response("Task not linked", "Only an open Google Task can be linked. Refresh the objective and try again.");
+    }
+    return showGoalDetails({ db, user, goalId: state.goalId, googleTasks });
+  }
+  const goalOpen = identifier.match(/^goal_open\|(GOAL-[A-Za-z0-9-]{1,48})$/);
+  if (goalOpen) return showGoalDetails({ db, user, goalId: goalOpen[1], googleTasks });
+  const goalProgress = identifier.match(/^goal_update\|(GKR-[A-Za-z0-9-]{1,48})$/);
+  if (goalProgress) {
+    const keyResult = await getGoalKeyResult(db, user.id, goalProgress[1]);
+    if (!keyResult || keyResult.status !== "Active") {
+      return response("Progress update unavailable", "This key result is not attached to an active objective.");
+    }
+    await setConversationState(db, user.id, {
+      type: "goal_update_progress",
+      goalId: keyResult.goal_id,
+      keyResultId: goalProgress[1]
+    }, now.toISOString());
+    return goalQuestion(
+      "Update key result",
+      `${keyResult.title}\nCurrent value: ${keyResult.current_value} ${keyResult.unit}\nEnter the new measured value.`,
+      "Number only"
+    );
+  }
   const calendarBlock = identifier.match(/^calendar_block\|(TASK-[A-Za-z0-9-]{1,48})$/);
   if (calendarBlock) {
     if (!googleCalendar || !googleCalendar.createTaskBlock) {
@@ -193,7 +614,7 @@ async function handleAction({ db, user, message, intent, googleTasks, googleCale
       title: "Choose when to work on it",
       sections: [{
         heading: task.title,
-        lines: ["Reply with a Cairo-local start time: YYYY-MM-DD HH:mm"]
+        lines: ["Reply with a Cairo-local start time, for example 11/25/2026 2:30 PM"]
       }],
       inputMode: "force_reply",
       inputPlaceholder: "2026-11-23 09:00"
@@ -387,12 +808,12 @@ async function handleAction({ db, user, message, intent, googleTasks, googleCale
           sections: [{
             heading: "",
             lines: [
-              "Reply with a date as YYYY-MM-DD.",
+              "Reply with a date like 11/25/2026 or Nov 25.",
               "The task due date will move in Google Tasks. A Calendar block is not created by this Worker yet."
             ]
           }],
           inputMode: "force_reply",
-          inputPlaceholder: "YYYY-MM-DD"
+          inputPlaceholder: "11/25/2026"
         };
       }
       if (choice === "Blocked") {
@@ -687,6 +1108,12 @@ async function handleAction({ db, user, message, intent, googleTasks, googleCale
 
     const completedTask = await googleTasks.complete(googleTaskId);
     await upsertGoogleTaskMirror(db, completedTask, now.toISOString());
+    await db.prepare(
+      `UPDATE reminder_history
+          SET user_response = 'Completed', confirmed_at = ?1
+        WHERE related_record_id = ?2 AND category = 'Overdue task'
+          AND delivery_status = 'Sent' AND user_response IS NULL`
+    ).bind(now.toISOString(), existing.id).run();
     await logSyncEvent(db, {
       source: "Google Tasks",
       operation: "Complete task",
@@ -716,6 +1143,336 @@ async function beginTaskCapture(db, user, now) {
   };
 }
 
+async function beginGoalCapture(db, user, now) {
+  await setConversationState(db, user.id, {
+    type: "goal_title",
+    startDate: cairoDateKey(now),
+    keyResults: []
+  }, now.toISOString(), 7200);
+  return goalQuestion(
+    "Create a goal",
+    "What is one meaningful objective you want to work toward? I will not invent goals for you.",
+    "Objective title"
+  );
+}
+
+async function showGoals({ db, user }) {
+  const goals = await listGoals(db, user.id);
+  if (!goals.length) {
+    return {
+      category: "Goals",
+      title: "No objectives defined yet",
+      sections: [{ heading: "", lines: ["The assistant will not invent your goals. Start an interview to define one in your own words."] }],
+      actions: [[{ label: "Start goal interview", action: "goal_new" }]]
+    };
+  }
+  const visibleGoals = goals.slice(0, 8);
+  const lines = visibleGoals.map(goal => {
+    const level = formatGoalLevel(goal.level);
+    const progress = goal.progress_fraction == null
+      ? "progress not measured"
+      : `${Math.round(goal.progress_fraction * 100)}% measured progress`;
+    const parent = goal.parent_title ? ` → ${goal.parent_title}` : "";
+    const deadline = goal.deadline ? ` · due ${goal.deadline}` : "";
+    return `${level}: ${goal.title}${parent}\n${progress}${deadline}\nNext: ${goal.next_action}`;
+  });
+  return {
+    category: "Goals",
+    title: "Active objectives",
+    sections: [{ heading: "", lines }],
+    actions: [
+      ...visibleGoals.map(goal => [{
+        label: `Open · ${goal.title.slice(0, 36)}`,
+        action: `goal_open|${goal.id}`
+      }]),
+      [{ label: "Define another goal", action: "goal_new" }]
+    ]
+  };
+}
+
+async function showGoalDetails({ db, user, goalId, googleTasks = null }) {
+  const goal = await getGoal(db, user.id, goalId);
+  if (!goal) return response("Goal not found", "This objective is unavailable for your account.");
+  const [keyResults, projects, linkedTasks] = await Promise.all([
+    getGoalKeyResults(db, goalId),
+    getGoalProjects(db, goalId),
+    getGoalTaskLinks(db, user.id, goalId)
+  ]);
+  const progress = goal.progress_fraction == null
+    ? "Not measured yet"
+    : `${Math.round(goal.progress_fraction * 100)}%`;
+  const summary = [
+    `Level: ${formatGoalLevel(goal.level)}${goal.parent_title ? ` · supports ${goal.parent_title}` : ""}`,
+    `Category: ${goal.category || "Not set"} · Status: ${goal.status}`,
+    `Why: ${goal.why_matters}`,
+    `Target: ${goal.target_outcome}`,
+    `Started: ${goal.start_date}${goal.deadline ? ` · Deadline: ${goal.deadline}` : ""}`,
+    `Progress: ${progress}`,
+    `Next action: ${goal.next_action}`,
+    ...(projects.length ? [`Related project: ${projects.join(", ")}`] : [])
+  ];
+  const sections = [{ heading: goal.title, lines: summary }];
+  const actions = [];
+  if (linkedTasks.length) {
+    sections.push({
+      heading: "Linked tasks",
+      lines: linkedTasks.slice(0, 8).map(task =>
+        `${task.title} · ${task.status}${task.due_date ? ` · due ${task.due_date}` : ""}`
+      )
+    });
+  }
+  if (keyResults.length) {
+    sections.push({
+      heading: "Key results",
+      lines: keyResults.map(item => {
+        const resultProgress = calculateKeyResultProgress(item);
+        const progressText = resultProgress == null ? "" : ` · ${Math.round(resultProgress * 100)}%`;
+        return `${item.title}: ${item.current_value} / ${item.target_value} ${item.unit}${progressText}`;
+      })
+    });
+    for (const item of keyResults.slice(0, 5)) {
+      actions.push([{
+        label: `Update · ${item.title.slice(0, 32)}`,
+        action: `goal_update|${item.id}`
+      }]);
+    }
+  }
+  if (goal.status === "Active" && googleTasks) {
+    actions.push([{ label: "Link an open task", action: `goal_link_start|${goal.id}` }]);
+  }
+  actions.push([{ label: "All goals", action: "goals_show" }]);
+  return {
+    category: "Goal details",
+    title: goal.title,
+    sections,
+    actions
+  };
+}
+
+async function beginGoalTaskLink({ db, user, googleTasks, goalId, now }) {
+  const goal = await getGoal(db, user.id, goalId);
+  if (!goal || goal.status !== "Active") {
+    return response("Goal unavailable", "Only an active objective can be linked to tasks.");
+  }
+  if (!googleTasks) {
+    return response("Google Tasks unavailable", "Task linking needs the configured Google Tasks integration.");
+  }
+  await syncTaskList({ db, googleTasks, now });
+  const [linkedTasks, tasks] = await Promise.all([
+    getGoalTaskLinks(db, user.id, goalId),
+    listPendingTaskMirrors(db, cairoDateKey(now), 20, 0)
+  ]);
+  const linkedIds = new Set(linkedTasks.map(task => task.id));
+  const candidates = tasks.filter(task => !linkedIds.has(task.id));
+  if (!candidates.length) {
+    return response("No open tasks to link", "Create or reopen a task in Google Tasks, then try linking again.");
+  }
+  await setConversationState(db, user.id, { type: "goal_task_link", goalId }, now.toISOString());
+  return {
+    category: "Goal task link",
+    title: "Choose an open Google Task",
+    sections: [{ heading: goal.title, lines: ["Linking records the relationship only; it does not change task status."] }],
+    actions: [
+      ...candidates.map(task => [{
+        label: task.title.slice(0, 50),
+        action: `goal_select_task|${task.id}`
+      }]),
+      [{ label: "Cancel", action: "goal_link_cancel" }]
+    ]
+  };
+}
+
+function goalQuestion(title, question, inputPlaceholder) {
+  return {
+    category: "Goal setup",
+    title,
+    sections: [{ heading: "", lines: [question] }],
+    inputMode: "force_reply",
+    inputPlaceholder
+  };
+}
+
+function formatGoalLevel(level) {
+  return ({
+    life_vision: "Life vision",
+    annual: "Annual objective",
+    quarterly: "Quarterly objective",
+    monthly: "Monthly milestone",
+    weekly: "Weekly outcome"
+  })[level] || level;
+}
+
+function calculateKeyResultProgress(keyResult) {
+  const { baseline_value: baseline, current_value: current, target_value: target } = keyResult;
+  const span = target - baseline;
+  if (!span) return null;
+  const progress = span > 0 ? (current - baseline) / span : (baseline - current) / -span;
+  return Math.min(1, Math.max(0, progress));
+}
+
+function parseGoalKeyResult(text) {
+  const parts = text.split("|").map(part => part.trim());
+  if (parts.length !== 4 || parts.some(part => !part)) return null;
+  const baselineValue = Number(parts[1]);
+  const targetValue = Number(parts[2]);
+  if (
+    !parts[0] ||
+    parts[0].length > 160 ||
+    parts[3].length > 40 ||
+    !Number.isFinite(baselineValue) ||
+    !Number.isFinite(targetValue) ||
+    baselineValue === targetValue
+  ) return null;
+  return { title: parts[0], baselineValue, targetValue, unit: parts[3] };
+}
+
+async function handleGoalConversationText({ db, user, state, text, googleTasks, now }) {
+  if (state.type === "goal_title") {
+    if (text.length > 180) return response("Title too long", "Keep the objective title under 180 characters.");
+    state.title = text;
+    state.type = "goal_level";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return {
+      category: "Goal setup",
+      title: "Choose the time horizon",
+      sections: [{ heading: state.title, lines: ["Pick the level that best fits. A goal can be linked to an active parent objective next."] }],
+      actions: [
+        [{ label: "Life vision", action: "goal_level|life_vision" }],
+        [{ label: "Annual", action: "goal_level|annual" }],
+        [{ label: "Quarterly", action: "goal_level|quarterly" }],
+        [{ label: "Monthly", action: "goal_level|monthly" }],
+        [{ label: "Weekly", action: "goal_level|weekly" }]
+      ]
+    };
+  }
+  if (state.type === "goal_category") {
+    if (text.length > 80) return response("Category too long", "Keep the category under 80 characters, or type skip.");
+    state.category = text.toLowerCase() === "skip" ? "" : text;
+    state.type = "goal_project";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Related project", "If this objective belongs to a project, name it. Otherwise type skip.", "Project name or skip");
+  }
+  if (state.type === "goal_project") {
+    if (text.length > 160) return response("Project name too long", "Keep the project name under 160 characters, or type skip.");
+    state.projectName = text.toLowerCase() === "skip" ? "" : text;
+    state.type = "goal_description";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Describe the objective", "Add useful context in a sentence or two, or type skip.", "Short description or skip");
+  }
+  if (state.type === "goal_description") {
+    if (text.length > 600) return response("Description too long", "Keep the description under 600 characters, or type skip.");
+    state.description = text.toLowerCase() === "skip" ? "" : text;
+    state.type = "goal_why";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Why does it matter?", "What makes this objective important to you?", "Your reason");
+  }
+  if (state.type === "goal_why") {
+    if (text.length > 600) return response("Answer too long", "Keep the reason under 600 characters.");
+    state.whyMatters = text;
+    state.type = "goal_target";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Define the target outcome", "What observable result would tell you this objective has succeeded?", "Measurable outcome");
+  }
+  if (state.type === "goal_target") {
+    if (text.length > 600) return response("Target too long", "Keep the target outcome under 600 characters.");
+    state.targetOutcome = text;
+    state.type = "goal_deadline";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion("Set a deadline", "Enter a date like 11/25/2026, Nov 25, or type none.", "11/25/2026 or none");
+  }
+  if (state.type === "goal_deadline") {
+    const deadline = text.toLowerCase() === "none" ? null : parseDateInput(text, now);
+    if (text.toLowerCase() !== "none" && (!deadline || deadline < state.startDate)) {
+      return response("Invalid deadline", "Use 11/25/2026 or Nov 25 on or after the start date, or type none.");
+    }
+    state.deadline = deadline;
+    state.type = "goal_key_result";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return goalQuestion(
+      "Add a measurable key result",
+      "Use: Measure | baseline | target | unit. Example: Weekly workouts | 0 | 3 | sessions.",
+      "Measure | baseline | target | unit"
+    );
+  }
+  if (state.type === "goal_key_result") {
+    const keyResult = parseGoalKeyResult(text);
+    if (!keyResult) {
+      return response(
+        "Key result format",
+        "Enter four parts separated by |, with numeric baseline and target values that differ. Example: Weekly workouts | 0 | 3 | sessions."
+      );
+    }
+    state.keyResults.push(keyResult);
+    state.type = "goal_more_key_results";
+    await setConversationState(db, user.id, state, now.toISOString());
+    const actions = state.keyResults.length < 5
+      ? [[{ label: "Add another", action: "goal_add_key_result" }, { label: "Continue", action: "goal_finish_key_results" }]]
+      : [[{ label: "Continue", action: "goal_finish_key_results" }]];
+    return {
+      category: "Goal setup",
+      title: "Key result recorded",
+      sections: [{ heading: keyResult.title, lines: [`Baseline: ${keyResult.baselineValue} · Target: ${keyResult.targetValue} ${keyResult.unit}`] }],
+      actions
+    };
+  }
+  if (state.type === "goal_next_action") {
+    if (text.length > 300) return response("Next action too long", "Keep the next action under 300 characters.");
+    state.goal = {
+      parentGoalId: state.parentGoalId || null,
+      level: state.level,
+      title: state.title,
+      description: state.description || "",
+      category: state.category || "",
+      projectName: state.projectName || "",
+      whyMatters: state.whyMatters,
+      targetOutcome: state.targetOutcome,
+      startDate: state.startDate,
+      deadline: state.deadline,
+      nextAction: text,
+      keyResults: state.keyResults
+    };
+    state.type = "goal_confirm";
+    await setConversationState(db, user.id, state, now.toISOString());
+    return {
+      category: "Goal confirmation",
+      title: "Save this objective?",
+      sections: [{
+        heading: state.title,
+        lines: [
+          `Level: ${formatGoalLevel(state.level)}`,
+          `Category: ${state.category || ""}${state.projectName ? ` · Project: ${state.projectName}` : ""}`.trim(),
+          `Why: ${state.whyMatters}`,
+          `Target: ${state.targetOutcome}`,
+          ...(state.deadline ? [`Deadline: ${shortDate(state.deadline)}`] : []),
+          ...state.keyResults.map(result => `Key result: ${result.title} · ${result.baselineValue} → ${result.targetValue} ${result.unit}`),
+          `Next action: ${state.goal.nextAction}`
+        ]
+      }],
+      actions: [[
+        { label: "Save objective", action: "goal_save" },
+        { label: "Cancel", action: "goal_cancel" }
+      ]]
+    };
+  }
+  if (state.type === "goal_update_progress") {
+    const value = Number(text);
+    if (!text || !Number.isFinite(value)) {
+      return response("Enter a number", "Send the measured value as a number, for example 4 or 2.5.");
+    }
+    await updateGoalKeyResult(
+      db,
+      user.id,
+      state.goalId,
+      state.keyResultId,
+      value,
+      now.toISOString()
+    );
+    await clearConversationState(db, user.id);
+    return showGoalDetails({ db, user, goalId: state.goalId, googleTasks });
+  }
+  return response("Goal interview", "Continue the active goal interview or restart with /goal.");
+}
+
 async function beginNextDayPlanning({ db, user, now }) {
   const date = shiftDateKey(cairoDateKey(now), 1);
   const runId = crypto.randomUUID();
@@ -730,16 +1487,25 @@ async function beginNextDayPlanning({ db, user, now }) {
 
 async function beginWeeklyReview({ db, user, now }) {
   const questions = getWeeklyReviewQuestions();
+  const activeGoals = await listGoals(db, user.id);
   await setConversationState(db, user.id, {
     type: "weekly_review",
     index: 0,
     date: cairoDateKey(now),
     runId: crypto.randomUUID()
   }, now.toISOString(), 7200);
-  return planningQuestion(`Weekly review 1/${questions.length}`, questions[0].text);
+  const prompt = planningQuestion(`Weekly review 1/${questions.length}`, questions[0].text);
+  return {
+    ...prompt,
+    sections: [
+      { heading: "Goal progress to reflect on", lines: formatGoalReview(activeGoals) },
+      ...prompt.sections
+    ]
+  };
 }
 
 async function beginMonthlyProjectReview({ db, user, now }) {
+  const activeGoals = await listGoals(db, user.id);
   await setConversationState(db, user.id, {
     type: "monthly_project_name",
     date: cairoDateKey(now),
@@ -748,17 +1514,31 @@ async function beginMonthlyProjectReview({ db, user, now }) {
   return {
     category: "Monthly project review",
     title: "Choose a project to review",
-    sections: [{ heading: "", lines: ["Every project needs a reason and a review date."] }],
+    sections: [
+      { heading: "Goal progress to reflect on", lines: formatGoalReview(activeGoals) },
+      { heading: "", lines: ["Every project needs a reason and a review date."] }
+    ],
     inputMode: "force_reply",
     inputPlaceholder: "Project name"
   };
 }
 
+function formatGoalReview(goals) {
+  if (!goals.length) return ["No objectives defined yet. Use /goal when ready; none are assumed."];
+  return goals.slice(0, 5).map(goal => {
+    const progress = goal.progress_fraction == null
+      ? "not measured"
+      : `${Math.round(goal.progress_fraction * 100)}% measured progress`;
+    const parent = goal.parent_title ? ` · supports ${goal.parent_title}` : "";
+    return `${formatGoalLevel(goal.level)}: ${goal.title}${parent} · ${progress}\nNext: ${goal.next_action}`;
+  }).concat(goals.length > 5 ? [`${goals.length - 5} more objectives.`] : []);
+}
+
 function getWeeklyReviewQuestions() {
   return [
     {
-      text: "On how many days did you complete your DEEP, WORK, and LIFE outcomes? Which areas felt clear?",
-      area: "DEEP/WORK/LIFE"
+      text: "On how many days did you complete your Growth, Work, and Life outcomes? Which areas felt clear?",
+      area: "Growth/Work/Life"
     },
     {
       text: "What repeatedly blocked you? Name the pattern, not a judgment about yourself.",
@@ -789,6 +1569,16 @@ function planningQuestion(title, question) {
   };
 }
 
+function forceReply(title, question) {
+  return {
+    category: "Availability planning",
+    title,
+    sections: [{ heading: "", lines: [question] }],
+    inputMode: "force_reply",
+    inputPlaceholder: "One short answer"
+  };
+}
+
 async function handleConversationText({
   db,
   user,
@@ -796,10 +1586,44 @@ async function handleConversationText({
   state,
   googleTasks,
   googleCalendar,
+  aiDailyPlanner,
   now
 }) {
   const text = String(message.message.text || "").trim();
   if (!text) return null;
+  if (state.type === "available_time_duration") {
+    if (!/^\d{1,3}$/.test(text)) {
+      return forceReply(
+        "Free-time duration needed",
+        "Enter the number of free minutes, from 25 to 360."
+      );
+    }
+    return beginAvailableTimeRequest({
+      db, user, minutes: Number(text), now
+    });
+  }
+  if (state.type === "available_time_start") {
+    const parsedTime = parseTimeInput(text);
+    if (!parsedTime) {
+      return forceReply(
+        "Cairo start time needed",
+        "Enter today's start time in Cairo, for example 2:30 PM or 14:30."
+      );
+    }
+    return createAvailableTimePlan({
+      db,
+      user,
+      minutes: state.minutes,
+      startTime: parsedTime,
+      googleTasks,
+      googleCalendar,
+      aiDailyPlanner,
+      now
+    });
+  }
+  if (typeof state.type === "string" && state.type.startsWith("goal_")) {
+    return handleGoalConversationText({ db, user, state, text, googleTasks, now });
+  }
 
   if (state.type === "outcome_define") {
     if (text.length > 500) {
@@ -837,10 +1661,11 @@ async function handleConversationText({
   }
 
   if (state.type === "outcome_reschedule") {
-    if (!isValidDateKey(text)) {
-      return response("Date format needed", "Enter a valid date as YYYY-MM-DD.");
+    const rescheduleDate = parseDateInput(text, now);
+    if (!rescheduleDate) {
+      return response("Date format needed", "Enter a date like 11/25/2026, 11/25, Nov 25, or tomorrow.");
     }
-    if (text < cairoDateKey(now)) {
+    if (rescheduleDate < cairoDateKey(now)) {
       return response("Choose a future date", "The new due date cannot be before today in Cairo.");
     }
     const session = await getFocusSession(db, state.focusSessionId);
@@ -861,7 +1686,7 @@ async function handleConversationText({
           await clearConversationState(db, user.id);
           return response("Task is not open", "Only a pending Google Task can be rescheduled.");
         }
-        const task = await googleTasks.reschedule(session.google_task_id, text);
+        const task = await googleTasks.reschedule(session.google_task_id, rescheduleDate);
         await upsertGoogleTaskMirror(db, task, now.toISOString());
         await logSyncEvent(db, {
           source: "Google Tasks",
@@ -873,7 +1698,7 @@ async function handleConversationText({
       }
       const outcome = await getDailyOutcome(db, session.outcome_date, session.area);
       if (!outcome) throw new Error("The daily outcome for this focus block could not be found.");
-      const details = `Moved to ${text}. Calendar block not created; the Worker Calendar integration is pending.`;
+      const details = `Moved to ${rescheduleDate}. Calendar block not created; the Worker Calendar integration is pending.`;
       await appendOutcomeIfChanged(db, outcome, "Rescheduled", details, now);
       await finalizeFocusSessionResponse(db, session.id, "Rescheduled", details, now);
       await clearConversationState(db, user.id);
@@ -883,7 +1708,7 @@ async function handleConversationText({
         sections: [{
           heading: "",
           lines: [
-            `Google Tasks due date: ${text}`,
+            `Google Tasks due date: ${shortDate(rescheduleDate)}`,
             "No Calendar block was created. You can add one from Google Calendar until that integration is migrated."
           ]
         }],
@@ -911,11 +1736,11 @@ async function handleConversationText({
       reviewDate: state.reviewDate,
       runId: state.runId
     }, now.toISOString());
-    return planningQuestion("Plan tomorrow — 2/5", "What is the one DEEP growth outcome?");
+    return planningQuestion("Plan tomorrow — 2/5", "What is the one Growth outcome?");
   }
 
   if (state.type === "next_day_deep") {
-    if (text.length > 500) return response("Outcome too long", "Keep the DEEP outcome under 500 characters.");
+    if (text.length > 500) return response("Outcome too long", "Keep the Growth outcome under 500 characters.");
     await setConversationState(db, user.id, {
       type: "next_day_work",
       date: state.date,
@@ -923,11 +1748,11 @@ async function handleConversationText({
       runId: state.runId,
       deep: text
     }, now.toISOString());
-    return planningQuestion("Plan tomorrow — 3/5", "What is the one WORK / SDR outcome?");
+    return planningQuestion("Plan tomorrow — 3/5", "What is the one Work / SDR outcome?");
   }
 
   if (state.type === "next_day_work") {
-    if (text.length > 500) return response("Outcome too long", "Keep the WORK outcome under 500 characters.");
+    if (text.length > 500) return response("Outcome too long", "Keep the Work outcome under 500 characters.");
     await setConversationState(db, user.id, {
       type: "next_day_life",
       date: state.date,
@@ -936,11 +1761,11 @@ async function handleConversationText({
       deep: state.deep,
       work: text
     }, now.toISOString());
-    return planningQuestion("Plan tomorrow — 4/5", "What is the one LIFE health or admin outcome?");
+    return planningQuestion("Plan tomorrow — 4/5", "What is the one Life health or admin outcome?");
   }
 
   if (state.type === "next_day_life") {
-    if (text.length > 500) return response("Outcome too long", "Keep the LIFE outcome under 500 characters.");
+    if (text.length > 500) return response("Outcome too long", "Keep the Life outcome under 500 characters.");
     await setConversationState(db, user.id, {
       type: "next_day_risk",
       date: state.date,
@@ -1052,7 +1877,7 @@ async function handleConversationText({
       date: state.date,
       runId: state.runId
     }, now.toISOString());
-    return planningQuestion("Work briefing — 2/3", "What is your hypothesis for reaching that target?");
+    return planningQuestion("Work briefing — 2/3", say("preshift_2", { now }));
   }
 
   if (state.type === "work_briefing_hypothesis") {
@@ -1071,7 +1896,7 @@ async function handleConversationText({
       date: state.date,
       runId: state.runId
     }, now.toISOString());
-    return planningQuestion("Work briefing — 3/3", "What is one learning question to test during the shift?");
+    return planningQuestion("Work briefing — 3/3", say("preshift_3", { now }));
   }
 
   if (state.type === "work_briefing_learning") {
@@ -1091,7 +1916,7 @@ async function handleConversationText({
       title: "Work intention saved",
       sections: [{ heading: "", lines: ["Keep the target visible, test your hypothesis, and capture one useful learning."] }],
       actions: [
-        [{ label: "Start WORK", action: "start_outcome|WORK" }],
+        [{ label: "Start 💼 Work", action: "start_outcome|WORK" }],
         [{ label: "Show full plan", action: "plan_my_day" }]
       ]
     };
@@ -1137,16 +1962,16 @@ async function handleConversationText({
   }
 
   if (state.type === "calendar_block_start") {
-    const match = text.match(/^(\d{4}-\d{2}-\d{2}) ([0-2]\d):([0-5]\d)$/);
-    if (!match || !isValidDateKey(match[1]) || Number(match[2]) > 23) {
+    const parsed = parseCairoDateTime(text, now);
+    if (!parsed) {
       return response(
         "Enter a valid Cairo start time",
-        "Use YYYY-MM-DD HH:mm in Cairo time, for example 2026-11-23 09:00."
+        "Use 11/25/2026 2:30 PM or 2026-11-25 14:30 in Cairo time."
       );
     }
     state.type = "calendar_block_duration";
-    state.date = match[1];
-    state.startTime = `${match[2]}:${match[3]}`;
+    state.date = parsed.dateKey;
+    state.startTime = parsed.time;
     await setConversationState(db, user.id, state, now.toISOString());
     return {
       category: "Calendar block",
@@ -1188,19 +2013,20 @@ async function handleConversationText({
       title: "Set a review date",
       sections: [{ heading: state.project, lines: [`${state.decision}: ${text}`] }],
       inputMode: "force_reply",
-      inputPlaceholder: "YYYY-MM-DD"
+      inputPlaceholder: "11/25/2026"
     };
   }
 
   if (state.type === "monthly_project_review_date") {
-    if (!isValidDateKey(text) || text <= cairoDateKey(now)) {
-      return response("Choose a future review date", "Enter a future date as YYYY-MM-DD.");
+    const reviewDate = parseDateInput(text, now);
+    if (!reviewDate || reviewDate <= cairoDateKey(now)) {
+      return response("Choose a future review date", "Enter a future date like 11/25/2026.");
     }
     await recordReviewNote(db, {
       id: `MONTH-${state.runId}`,
       reviewType: "Monthly project decision",
       reviewDate: state.date,
-      question: `${state.decision}: ${state.project}; review date ${text}`,
+      question: `${state.decision}: ${state.project}; review date ${reviewDate}`,
       answer: state.reason,
       relatedArea: state.project,
       createdAt: now.toISOString()
@@ -1214,7 +2040,7 @@ async function handleConversationText({
         lines: [
           `Decision: ${state.decision}`,
           `Reason: ${state.reason}`,
-          `Review date: ${text}`,
+          `Review date: ${shortDate(reviewDate)}`,
           "Add the same decision to the Trello project card. No Trello API is used."
         ]
       }],
@@ -1261,13 +2087,13 @@ async function handleConversationText({
       sections: [{ heading: "", lines: [text] }],
       actions: [
         [
-          { label: "DEEP", action: "task_area|DEEP" },
-          { label: "WORK", action: "task_area|WORK" },
-          { label: "LIFE", action: "task_area|LIFE" }
+          { label: "🌱 Growth", action: "task_area|DEEP" },
+          { label: "💼 Work", action: "task_area|WORK" },
+          { label: "🏠 Life", action: "task_area|LIFE" }
         ],
         [
-          { label: "Admin", action: "task_area|Admin" },
-          { label: "Other", action: "task_area|Other" }
+          { label: "📎 Errands", action: "task_area|Admin" },
+          { label: "⋯ Other", action: "task_area|Other" }
         ]
       ]
     };
@@ -1309,7 +2135,8 @@ async function createCapturedTask({
   addToTop3,
   googleTasks,
   googleCalendar = null,
-  now
+  now,
+  clearConversation = true
 }) {
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
   if (!state.requestId) {
@@ -1379,7 +2206,7 @@ async function createCapturedTask({
       updatedAt: now.toISOString()
     });
   }
-  await clearConversationState(db, user.id);
+  if (clearConversation) await clearConversationState(db, user.id);
   const sections = [{
     heading: state.title,
     lines: [
@@ -1423,7 +2250,7 @@ async function appendDailyOutcomeFromTask(db, outcome) {
   ).run();
 }
 
-async function createPlannedOutcomeTask({
+export async function createPlannedOutcomeTask({
   db,
   googleTasks,
   requestId,
@@ -1516,11 +2343,277 @@ async function getDailyOutcomesForDate(db, date) {
   }
   return ["DEEP", "WORK", "LIFE"].map((area, index) => {
     const outcome = latest.get(area);
-    return `${index + 1}. ${area} — ${outcome ? outcome.outcome : "Not set yet"}${outcome && outcome.status !== "Planned" ? ` (${outcome.status})` : ""}`;
-  });
+    return outcome
+      ? `${index + 1}. ${areaLabel(area)} — ${outcome.outcome}${outcome.status !== "Planned" ? ` (${outcome.status})` : ""}`
+      : null;
+  }).filter(Boolean);
 }
 
-async function showHome({ db, googleTasks, googleCalendar, now }) {
+async function readCalendarEvents(db, googleCalendar, date, now) {
+  if (!googleCalendar) return { enabled: false, events: null, errorDetails: null };
+  try {
+    return {
+      enabled: true,
+      events: await googleCalendar.listEventsForDate(date),
+      errorDetails: null
+    };
+  } catch (error) {
+    const errorDetails = formatGoogleErrorDetails(error);
+    await logSystemEvent(db, {
+      occurredAt: now.toISOString(),
+      severity: "WARN",
+      component: "Google Calendar",
+      eventType: "Calendar read failed",
+      description: "Could not retrieve events for a daily plan.",
+      errorMessage: errorDetails
+    });
+    return { enabled: true, events: null, errorDetails };
+  }
+}
+
+async function beginAvailableTimeRequest({ db, user, minutes, now }) {
+  if (minutes === null) {
+    await setConversationState(db, user.id, {
+      type: "available_time_duration"
+    }, now.toISOString());
+    return forceReply(
+      "How much free time?",
+      "Enter the number of free minutes, from 25 to 360."
+    );
+  }
+  if (!Number.isInteger(minutes) || minutes < 25 || minutes > 360) {
+    return response(
+      "Free-time duration out of range",
+      "Choose a whole number of minutes from 25 to 360."
+    );
+  }
+  await setConversationState(db, user.id, {
+    type: "available_time_start",
+    minutes
+  }, now.toISOString());
+  return forceReply(
+    "When does your free time start?",
+    `Enter today's start time in Cairo as HH:MM. I'll check your Calendar before suggesting up to three focus sessions for ${minutes} minutes.`
+  );
+}
+
+async function createAvailableTimePlan({
+  db,
+  user,
+  minutes,
+  startTime,
+  googleTasks,
+  googleCalendar,
+  aiDailyPlanner,
+  now
+}) {
+  const date = cairoDateKey(now);
+  const [hour, minute] = startTime.split(":").map(Number);
+  const startMinute = hour * 60 + minute;
+  const currentParts = cairoTimeParts(now);
+  const currentMinute = Number(currentParts.hour) * 60 + Number(currentParts.minute);
+  const endMinute = startMinute + minutes;
+  if (startMinute <= currentMinute) {
+    return forceReply(
+      "Choose a future start time",
+      "That time has already passed in Cairo today. Enter a later HH:MM time."
+    );
+  }
+  if (endMinute > 24 * 60) {
+    return forceReply(
+      "Window crosses midnight",
+      "Choose an earlier start time so the free-time window ends before midnight Cairo time."
+    );
+  }
+  if (!googleCalendar) {
+    return response(
+      "Calendar availability unavailable",
+      "I can't verify this window because Calendar access is disabled. No schedule was created; enable Calendar access or try again later."
+    );
+  }
+
+  const calendar = await readCalendarEvents(db, googleCalendar, date, now);
+  if (!calendar.events) {
+    return response(
+      "Calendar availability unavailable",
+      `I couldn't verify this window (${calendar.errorDetails}). No focus plan was created. Resolve Calendar access, then try /available again.`
+    );
+  }
+  const startIso = Date.parse(cairoLocalDateTimeToIso(date, startTime));
+  const endIso = startIso + minutes * 60_000;
+  const conflicts = calendar.events.filter(event =>
+    calendarEventOverlaps(event, date, startMinute, endMinute, startIso, endIso)
+  );
+  if (conflicts.length) {
+    const conflictLines = conflicts.slice(0, 5).map(event =>
+      event.allDay
+        ? `All day · ${event.title}`
+        : `${event.start}–${event.end} · ${event.title}`
+    );
+    return {
+      category: "Availability conflict",
+      title: "Calendar is busy during that window",
+      sections: [{
+        heading: "Conflicting events",
+        lines: conflictLines
+      }, {
+        heading: "",
+        lines: ["Enter another start time in Cairo. No Calendar event or task was changed."]
+      }],
+      inputMode: "force_reply",
+      inputPlaceholder: "HH:MM"
+    };
+  }
+  if (!googleTasks) {
+    return response(
+      "Google Tasks unavailable",
+      "I can't build a task-based focus plan without syncing the authoritative Google Tasks list."
+    );
+  }
+
+  await syncTaskList({ db, googleTasks, now });
+  const candidates = await listPendingTaskPlanningCandidates(db, date);
+  if (!candidates.length) {
+    await clearConversationState(db, user.id);
+    return response(
+      "No pending tasks",
+      "There are no pending Google Tasks to include. Your Calendar and task list were not changed."
+    );
+  }
+
+  const goalFocus = await listDailyGoalFocus(db, user.id, date, 3);
+  const planningCandidates = candidates.slice(0, 12);
+  const rankedIds = [];
+  let aiUsed = false;
+  let aiUnavailable = false;
+  if (aiDailyPlanner) {
+    try {
+      const taskIds = await aiDailyPlanner({
+        date,
+        tasks: planningCandidates,
+        goals: goalFocus
+      });
+      if (taskIds === null) {
+        aiUnavailable = true;
+      } else if (!Array.isArray(taskIds)) {
+        throw new TypeError("AI daily prioritizer returned an invalid result.");
+      } else {
+        const allowedIds = new Set(planningCandidates.map(task => task.id));
+        rankedIds.push(...[...new Set(taskIds.filter(id => allowedIds.has(id)))].slice(0, 3));
+        aiUsed = rankedIds.length > 0;
+      }
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: "ai_availability_prioritization_failed",
+        errorType: error && error.name || "Error"
+      }));
+      aiUnavailable = true;
+    }
+  }
+  for (const task of candidates) {
+    if (rankedIds.length >= 3) break;
+    if (!rankedIds.includes(task.id)) rankedIds.push(task.id);
+  }
+  const tasksById = new Map(candidates.map(task => [task.id, task]));
+  const tasks = rankedIds.map(id => tasksById.get(id)).filter(Boolean);
+  const schedule = buildAvailableTimeSchedule(startMinute, minutes, tasks);
+  await clearConversationState(db, user.id);
+
+  const sections = [{
+    heading: `Suggested focus plan · ${date}`,
+    lines: schedule.blocks.map(block =>
+      `${formatMinuteOfDay(block.start)}–${formatMinuteOfDay(block.end)} · ${block.title} (${block.minutes} min)`
+    )
+  }];
+  const breaks = schedule.breaks.map(block =>
+    `${formatMinuteOfDay(block.start)}–${formatMinuteOfDay(block.end)} · Break`
+  );
+  if (breaks.length) sections.push({ heading: "Breaks", lines: breaks });
+  if (schedule.unallocatedMinutes > 0) {
+    sections.push({
+      heading: "Unallocated buffer",
+      lines: [`${schedule.unallocatedMinutes} minutes left unscheduled; no duration was inferred for any task.`]
+    });
+  }
+  sections.push({
+    heading: "How this was built",
+    lines: [
+      aiUsed
+        ? "Workers AI ranked the pending Google Tasks; the remaining order uses due dates and task priority."
+        : aiUnavailable
+          ? "Workers AI was unavailable or at its usage limit; tasks are ordered deterministically by due date and priority."
+          : "Tasks are ordered deterministically by due date and priority.",
+      "Calendar was checked for conflicts. This is advisory only: no Calendar events were created and no task status or due date changed."
+    ]
+  });
+  return {
+    category: "Availability planning",
+    title: "Your free-time focus plan",
+    sections,
+    actions: [[{ label: "Back to daily plan", action: "home" }]]
+  };
+}
+
+function calendarEventOverlaps(event, date, startMinute, endMinute, startIso, endIso) {
+  if (event.allDay) return true;
+  const eventStart = Date.parse(event.startTime || "");
+  const eventEnd = Date.parse(event.endTime || "");
+  if (Number.isFinite(eventStart) && Number.isFinite(eventEnd)) {
+    return eventStart < endIso && eventEnd > startIso;
+  }
+  if (!/^\d{2}:\d{2}$/.test(String(event.start || "")) ||
+      !/^\d{2}:\d{2}$/.test(String(event.end || ""))) {
+    return false;
+  }
+  const [startHour, startMinutePart] = event.start.split(":").map(Number);
+  const [endHour, endMinutePart] = event.end.split(":").map(Number);
+  const eventStartMinute = startHour * 60 + startMinutePart;
+  let eventEndMinute = endHour * 60 + endMinutePart;
+  if (eventEndMinute <= eventStartMinute) eventEndMinute += 24 * 60;
+  const extendsFromPreviousDay = event.startTime &&
+    !Number.isNaN(Date.parse(event.startTime)) &&
+    cairoDateKey(new Date(event.startTime)) < date;
+  const effectiveStart = extendsFromPreviousDay ? eventStartMinute - 24 * 60 : eventStartMinute;
+  return effectiveStart < endMinute && eventEndMinute > startMinute;
+}
+
+function buildAvailableTimeSchedule(startMinute, totalMinutes, tasks) {
+  const blocks = [];
+  const breaks = [];
+  let cursor = startMinute;
+  let remaining = totalMinutes;
+  for (let index = 0; index < tasks.length; index++) {
+    const task = tasks[index];
+    if (remaining < 25) break;
+    const workMinutes = remaining >= 50 ? 50 : remaining >= 25 ? 25 : remaining;
+    blocks.push({
+      start: cursor,
+      end: cursor + workMinutes,
+      minutes: workMinutes,
+      title: task.title
+    });
+    cursor += workMinutes;
+    remaining -= workMinutes;
+    if (workMinutes === 50 && index < tasks.length - 1 && remaining >= 35) {
+      breaks.push({ start: cursor, end: cursor + 10 });
+      cursor += 10;
+      remaining -= 10;
+    }
+  }
+  return {
+    blocks,
+    breaks,
+    unallocatedMinutes: remaining
+  };
+}
+
+function formatMinuteOfDay(value) {
+  const hour = String(Math.floor(value / 60)).padStart(2, "0");
+  const minute = String(value % 60).padStart(2, "0");
+  return `${hour}:${minute}`;
+}
+
+async function showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now }) {
   const date = cairoDateKey(now);
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
   await syncTaskList({ db, googleTasks, now });
@@ -1536,83 +2629,205 @@ async function showHome({ db, googleTasks, googleCalendar, now }) {
   }
   const outcomeLines = ["DEEP", "WORK", "LIFE"].map((area, index) => {
     const outcome = latest.get(area);
-    const value = outcome ? outcome.outcome : "Not set yet";
-    return `${index + 1}. ${area} — ${value}`;
-  });
-  const tasks = await listPendingTaskMirrors(db, date, 3, 0);
-  const calendarEvents = googleCalendar
-    ? await googleCalendar.listEventsForDate(date)
-    : [];
+    return outcome ? `${index + 1}. ${areaLabel(area)} — ${outcome.outcome}` : null;
+  }).filter(Boolean);
+  const taskCandidates = await listPendingTaskPlanningCandidates(db, date);
+  const taskPlan = buildDailyTaskPlan(taskCandidates, date);
+  const goalFocus = await listDailyGoalFocus(db, user.id, date);
+  const calendar = await readCalendarEvents(db, googleCalendar, date, now);
   const sections = [{
     heading: "Your three outcomes",
     lines: outcomeLines
-  }];
-  if (tasks.length) {
-    sections.push({ heading: "Next action", lines: [tasks[0].title] });
-  }
-  if (googleCalendar) {
+  }, ...formatDailyTaskPlan(taskPlan, date)];
+  sections.push({
+    heading: "Goal-aligned next actions",
+    lines: goalFocus.length
+      ? formatGoalFocus(goalFocus, date)
+      : ["No objectives defined yet. Use /goal to define one when ready."]
+  });
+  if (calendar.enabled) {
     sections.push({
       heading: "Today's calendar",
-      lines: calendarEvents.length
-        ? calendarEvents.map(formatCalendarEvent)
-        : ["No appointments today."]
+      lines: calendar.events
+        ? calendar.events.length
+          ? calendar.events.map(formatCalendarEvent)
+          : ["No appointments today."]
+        : [
+            `Calendar unavailable (${calendar.errorDetails}).`,
+            formatCalendarFailureGuidance(calendar.errorDetails),
+            "Your synchronized task plan is still available."
+          ]
     });
   }
   sections.push({ heading: "", lines: ["What do you want to move forward now?"] });
 
+  const actions = [
+    [
+      { label: "🌱 Growth", action: "start_outcome|DEEP" },
+      { label: "💼 Work", action: "start_outcome|WORK" }
+    ],
+    [{ label: "🏠 Life", action: "start_outcome|LIFE" }],
+    [
+      { label: "Add something", action: "add_task" },
+      { label: "Show full plan", action: "show_tasks" }
+    ]
+  ];
+  if (aiDailyPlanner) {
+    actions.push([{ label: "AI focus suggestion", action: `ai_daily_plan|${date}` }]);
+  }
+  actions.push([{ label: "Review goals", action: "goals_show" }]);
   return {
     category: "Daily home",
     title: "Good morning.",
     sections,
-    actions: [
-      [
-        { label: "Start DEEP", action: "start_outcome|DEEP" },
-        { label: "Start WORK", action: "start_outcome|WORK" }
-      ],
-      [{ label: "Start LIFE", action: "start_outcome|LIFE" }],
-      [
-        { label: "Add something", action: "add_task" },
-        { label: "Show full plan", action: "show_tasks" }
+    actions
+  };
+}
+
+async function showAiDailyPrioritySuggestion({
+  db,
+  user,
+  googleTasks,
+  aiDailyPlanner,
+  date,
+  now
+}) {
+  if (date !== cairoDateKey(now)) {
+    return response("Suggestion expired", "Open today's plan to request a current recommendation.");
+  }
+  if (!aiDailyPlanner) {
+    return response("AI planning disabled", "The deterministic daily plan remains available; no AI request was made.");
+  }
+  if (!googleTasks) {
+    return response("Google Tasks unavailable", "A current task sync is required; no recommendation was made.");
+  }
+  await syncTaskList({ db, googleTasks, now });
+  const existing = await getDailyFocusRecommendation(db, user.id, date);
+  if (existing) return formatStoredAiDailyRecommendation(existing, date);
+  const candidates = (await listPendingTaskPlanningCandidates(db, date)).slice(0, 12);
+  if (!candidates.length) {
+    return response("No open tasks", "There are no pending Google Tasks to prioritize.");
+  }
+  const goals = await listDailyGoalFocus(db, user.id, date, 3);
+
+  let taskIds;
+  try {
+    taskIds = await aiDailyPlanner({ date, tasks: candidates, goals });
+  } catch (error) {
+    console.error(JSON.stringify({
+      event: "ai_daily_prioritization_failed",
+      errorType: error && error.name || "Error"
+    }));
+    return response(
+      "AI suggestion unavailable",
+      "I couldn't safely produce a recommendation. Your deterministic plan and Google Tasks are unchanged."
+    );
+  }
+  if (taskIds === null) {
+    return response(
+      "AI suggestion unavailable",
+      "The AI usage or input limit was reached. Your deterministic plan and Google Tasks are unchanged."
+    );
+  }
+  if (!Array.isArray(taskIds)) {
+    throw new TypeError("AI daily prioritizer returned an invalid result.");
+  }
+  const tasksById = new Map(candidates.map(task => [task.id, task]));
+  const safeTaskIds = [...new Set(taskIds)]
+    .filter(id => tasksById.has(id))
+    .slice(0, 3);
+  const saved = await saveDailyFocusRecommendation(
+    db,
+    user.id,
+    date,
+    safeTaskIds,
+    now.toISOString()
+  );
+  return formatStoredAiDailyRecommendation(saved, date);
+}
+
+function formatStoredAiDailyRecommendation(recommendation, date) {
+  const selectedTasks = recommendation.tasks;
+  const decision = recommendation.decision === "Pending"
+    ? "No response recorded yet."
+    : `Your response: ${recommendation.decision.toLowerCase()}.`;
+  return {
+    category: "AI daily recommendation",
+    title: "Suggested focus",
+    sections: [{
+      heading: "Review before acting",
+      lines: selectedTasks.length
+        ? selectedTasks.map((task, index) =>
+          `${index + 1}. ${task.title}\n${task.status === "Pending"
+            ? `Signal: ${formatTaskPriorityEvidence(task, date)}`
+            : `Current Google Tasks status: ${task.status}`}`
+        )
+        : ["No task was selected. Use the deterministic plan to choose your next action."]
+    }, {
+      heading: "",
+      lines: [
+        "This is a suggestion based on up to 12 pending tasks and active goals. No task was changed.",
+        decision
       ]
+    }],
+    actions: [
+      ...(recommendation.taskIds.length
+        ? [[
+            { label: "Accept suggestion", action: `ai_recommendation|${recommendation.id}|accepted` },
+            { label: "Not now", action: `ai_recommendation|${recommendation.id}|rejected` }
+          ]]
+        : []),
+      [{ label: "Back to daily plan", action: "home" }]
     ]
   };
 }
 
-async function showPlanForDate({ db, googleTasks, googleCalendar, date, title, now }) {
+function formatTaskPriorityEvidence(task, date) {
+  const evidence = [];
+  if (task.due_date && task.due_date <= date) {
+    evidence.push(task.due_date < date ? "overdue" : "due today");
+  }
+  if (task.priority === "High") evidence.push("high priority");
+  if (Number(task.linked_goal_count) > 0) evidence.push("supports an active goal");
+  const postponements = Number(task.postponement_count || 0);
+  if (postponements >= 3) evidence.push(`postponed ${postponements} times`);
+  return evidence.length ? evidence.join(", ") : "selected from pending tasks; confirm it fits";
+}
+
+async function showPlanForDate({ db, user, googleTasks, googleCalendar, date, title, now }) {
   if (!isValidDateKey(date)) throw new TypeError("Requested plan date is invalid.");
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
   await syncTaskList({ db, googleTasks, now });
   const outcomes = await getDailyOutcomesForDate(db, date);
-  const taskResult = await db.prepare(
-    `SELECT title, priority
-       FROM tasks
-      WHERE status = 'Pending' AND due_date = ?1
-      ORDER BY CASE priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
-               title
-      LIMIT 20`
-  ).bind(date).all();
-  const dueTasks = taskResult.results;
-  const calendarEvents = googleCalendar
-    ? await googleCalendar.listEventsForDate(date)
-    : null;
+  const taskCandidates = await listPendingTaskPlanningCandidates(db, date);
+  const taskPlan = buildDailyTaskPlan(taskCandidates, date);
+  const goalFocus = await listDailyGoalFocus(db, user.id, date);
+  const calendar = await readCalendarEvents(db, googleCalendar, date, now);
   return {
     category: "Daily plan",
     title,
     sections: [
-      { heading: "DEEP · WORK · LIFE", lines: outcomes },
+      { heading: "🌱 Growth · 💼 Work · 🏠 Life", lines: outcomes },
+      ...formatDailyTaskPlan(taskPlan, date, cairoDateKey(now)),
       {
-        heading: "Tasks due",
-        lines: dueTasks.length
-          ? dueTasks.map(task => `${task.title} — ${task.priority || "Medium"}`)
-          : ["No tasks due on this date."]
+        heading: "Goal-aligned next actions",
+        lines: goalFocus.length
+          ? formatGoalFocus(goalFocus, date)
+          : ["No objectives defined yet. Use /goal to define one when ready."]
       },
       {
         heading: "Calendar",
-        lines: calendarEvents
-          ? calendarEvents.length
-            ? calendarEvents.map(formatCalendarEvent)
-            : ["No appointments on this date."]
-          : ["Calendar integration is disabled until OAuth access is authorized."]
+        lines: !calendar.enabled
+          ? ["Calendar integration is disabled until OAuth access is authorized."]
+          : calendar.events
+            ? calendar.events.length
+              ? calendar.events.map(formatCalendarEvent)
+              : ["No appointments on this date."]
+            : [
+                `Calendar unavailable (${calendar.errorDetails}).`,
+                formatCalendarFailureGuidance(calendar.errorDetails),
+                "The task plan is still available."
+              ]
       }
     ],
     actions: [
@@ -1620,6 +2835,21 @@ async function showPlanForDate({ db, googleTasks, googleCalendar, date, title, n
       [{ label: "Back to home", action: "home" }]
     ]
   };
+}
+
+function formatGoalFocus(goals, date) {
+  return goals.map(goal => {
+    const deadline = goal.deadline
+      ? ` · deadline ${goal.deadline}${goal.deadline < date ? " (passed)" : ""}`
+      : "";
+    const progress = goal.progress_fraction == null
+      ? ""
+      : ` · measured ${Math.round(goal.progress_fraction * 100)}%`;
+    const linkedTask = goal.linked_task_title
+      ? ` · linked task: ${goal.linked_task_title}`
+      : "";
+    return `${formatGoalLevel(goal.level)}: ${goal.title}${deadline}${progress}\nNext: ${goal.next_action}${linkedTask}`;
+  });
 }
 
 function formatCalendarEvent(event) {
@@ -1673,6 +2903,227 @@ async function showTasks({ db, googleTasks, now }) {
   };
 }
 
+async function showOverdueTasks({ db, googleTasks, now }) {
+  const today = cairoDateKey(now);
+  if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+  await syncTaskList({ db, googleTasks, now });
+  const tasks = await listOverdueTaskMirrors(db, today, 20);
+  if (!tasks.length) {
+    return {
+      category: "Overdue tasks",
+      title: "No overdue tasks",
+      sections: [{
+        heading: "",
+        lines: ["Google Tasks currently has no pending tasks past their due date."]
+      }],
+      actions: [[{ label: "Back to home", action: "home" }]]
+    };
+  }
+  const actions = tasks.filter(task => task.google_task_id).slice(0, 5).map(task => ([{
+    label: `Done · ${task.title.slice(0, 30)}`,
+    action: `task_complete|${task.google_task_id}`
+  }]));
+  actions.push([{ label: "Show open tasks", action: "show_tasks" }]);
+  return {
+    category: "Overdue tasks",
+    title: "Pending past their due date",
+    sections: [{
+      heading: `Showing up to ${tasks.length} overdue tasks`,
+      lines: tasks.map(task =>
+        `${task.title} · due ${task.due_date} · ${task.priority || "Medium"} priority`
+      )
+    }],
+    actions
+  };
+}
+
+async function showInboxTriage({
+  db,
+  googleGmail,
+  emailFollowUpAnalyzer,
+  now
+}) {
+  if (!googleGmail) {
+    return {
+      category: "Gmail inbox",
+      title: "Read-only inbox access is disabled",
+      sections: [{
+        heading: "",
+        lines: ["This view requires the Gmail read-only OAuth scope and GOOGLE_GMAIL_READ_ENABLED. Sending scheduled reports is a separate permission."]
+      }],
+      actions: []
+    };
+  }
+
+  let threads;
+  try {
+    threads = await googleGmail.listUnreadInboxThreads(5);
+  } catch (error) {
+    await logSystemEvent(db, {
+      occurredAt: now.toISOString(),
+      severity: "WARN",
+      component: "Gmail triage",
+      eventType: "Inbox read failed",
+      description: "Could not retrieve Gmail inbox metadata.",
+      errorMessage: formatGoogleErrorDetails(error)
+    });
+    const failureMessage = error && error.oauthErrorCode === "invalid_grant"
+      ? "Google rejected the saved refresh grant. Reauthorize Google and update the existing OAuth secret directly in Cloudflare; do not send credentials here."
+      : error && error.oauthErrorCode === "invalid_client"
+        ? "Google rejected the OAuth client credentials. Correct the existing client credentials in Cloudflare; do not send them here."
+        : error && Number(error.status) === 403
+          ? "Google denied Gmail read access. Confirm the Gmail read-only scope and API access."
+          : "Confirm that the configured Google OAuth connection can read Gmail metadata.";
+    return {
+      category: "Gmail inbox",
+      title: "Gmail inbox access unavailable",
+      sections: [{
+        heading: "",
+        lines: [
+          `I couldn't read inbox metadata (${formatGoogleErrorDetails(error)}).`,
+          failureMessage,
+          "No messages were marked read or sent."
+        ]
+      }],
+      actions: []
+    };
+  }
+
+  if (!threads.length) {
+    return {
+      category: "Gmail inbox",
+      title: "No unread conversations to review",
+      sections: [{
+        heading: "",
+        lines: ["No unread inbound Gmail messages were found. No messages were changed."]
+      }],
+      actions: []
+    };
+  }
+
+  let followUps = null;
+  let analysisMessage = "";
+  if (emailFollowUpAnalyzer && typeof googleGmail.readMessageText === "function") {
+    try {
+      const analyzedThreads = await Promise.all(threads.map(async thread => ({
+        ...thread,
+        bodyText: await googleGmail.readMessageText(thread.messageId)
+      })));
+      followUps = await emailFollowUpAnalyzer(analyzedThreads);
+      if (!followUps) {
+        analysisMessage = "Workers AI couldn't analyze these messages (no readable plain text, temporary service issue, or daily free-usage limit). No messages were changed.";
+      }
+    } catch (error) {
+      await logSystemEvent(db, {
+        occurredAt: now.toISOString(),
+        severity: "WARN",
+        component: "Gmail triage",
+        eventType: "Email follow-up analysis failed",
+        description: "Could not safely analyze unread Gmail message text.",
+        errorMessage: formatGoogleErrorDetails(error)
+      });
+      analysisMessage = "I couldn't safely analyze message contents. No messages were changed.";
+    }
+  } else {
+    analysisMessage = "Workers AI email analysis is disabled or unavailable. No messages were changed.";
+  }
+
+  const verifiedFollowUps = Array.isArray(followUps)
+    ? followUps.filter(item =>
+        item &&
+        /^[A-Za-z0-9_-]{1,32}$/.test(item.threadId) &&
+        threads.some(thread => thread.threadId === item.threadId)
+      )
+    : [];
+  const actionLabels = {
+    reply: "A reply may be needed",
+    prepare: "Preparation may be needed",
+    review: "Review may be needed",
+    provide_information: "Requested information may be needed",
+    confirm: "A decision or confirmation may be needed",
+    other: "A follow-up may be needed"
+  };
+  const threadById = new Map(threads.map(thread => [thread.threadId, thread]));
+  const actions = verifiedFollowUps.flatMap(item => [[
+    { label: "Create follow-up task", action: `gmail_followup_task|${item.threadId}` },
+    { label: "Not now", action: `gmail_followup_dismiss|${item.threadId}` }
+  ]]);
+  const followUpLines = verifiedFollowUps.map(item => {
+    const thread = threadById.get(item.threadId);
+    return [
+      `${truncate(thread.subject, 140)} · ${actionLabels[item.actionType] || "A follow-up may be needed"}`,
+      `Evidence: “${truncate(item.evidenceQuote, 160)}”`,
+      item.deadlineEvidence
+        ? `Deadline wording: “${truncate(item.deadlineEvidence, 100)}”`
+        : ""
+    ].filter(Boolean).join("\n");
+  });
+  const sections = [
+    {
+      heading: "Unread inbound messages",
+      lines: threads.map(thread =>
+        `From: ${thread.from}\nSubject: ${truncate(thread.subject, 180)}\nReceived: ${formatCairoDateTime(thread.receivedAt)}`
+      )
+    }
+  ];
+  if (verifiedFollowUps.length) {
+    sections.push({
+      heading: "Workers AI potential follow-ups (evidence checked against the message)",
+      lines: followUpLines
+    });
+  } else if (followUps && followUps.length === 0) {
+    sections.push({
+      heading: "Workers AI review",
+      lines: ["No verifiable action request was found in the analyzed text. Review the messages yourself; this is not proof that no action is needed."]
+    });
+  }
+  sections.push({
+    heading: "",
+    lines: [
+      "No messages were marked read or sent.",
+      analysisMessage,
+      verifiedFollowUps.length
+        ? "Workers AI suggestions are advisory. A task is added to Google Tasks only after you tap its button; no email is sent."
+        : ""
+    ].filter(Boolean)
+  });
+  return {
+    category: "Gmail inbox",
+    title: "Unread email conversations",
+    sections,
+    actions
+  };
+}
+
+async function showManualAccountabilityCheckin({ db, now }) {
+  const date = cairoDateKey(now);
+  const checkins = await listManualAccountabilityCheckins(db, date);
+  return {
+    category: "Manual accountability",
+    title: "Trello and Obsidian check-in",
+    sections: [{
+      heading: date,
+      lines: checkins.map(checkin => {
+        const label = checkin.routine_id === "ROUTINE-TRELLO" ? "Trello" : "Obsidian";
+        const status = checkin.status === "Completed"
+          ? "Done today"
+          : checkin.status === "Missed" ? "Not done today" : "Not recorded today";
+        return `${label}: ${status}`;
+      })
+    }, {
+      heading: "",
+      lines: ["This is a manual check-in. The assistant does not access Trello or Obsidian."]
+    }],
+    actions: checkins.map(checkin => {
+      const label = checkin.routine_id === "ROUTINE-TRELLO" ? "Trello" : "Obsidian";
+      return [
+        { label: `${label}: Done`, action: `accountability_done|${checkin.routine_id}` },
+        { label: `${label}: Not done`, action: `accountability_missed|${checkin.routine_id}` }
+      ];
+    })
+  };
+}
+
 async function beginFocusNow({ db, user, now }) {
   const date = cairoDateKey(now);
   const result = await db.prepare(
@@ -1693,7 +3144,7 @@ async function beginFocusNow({ db, user, now }) {
     return {
       category: "Focus now",
       title: "No outcome is set for today",
-      sections: [{ heading: "", lines: ["Add a next action and choose DEEP, WORK, or LIFE."] }],
+      sections: [{ heading: "", lines: ["Add a next action and choose Growth, Work, Life, Errands, or Other."] }],
       actions: [[{ label: "Add something", action: "add_task" }]]
     };
   }
@@ -1776,12 +3227,264 @@ async function appendOutcomeIfChanged(db, outcome, status, details, now) {
   await appendDailyOutcomeStatus(db, outcome, status, details, now);
 }
 
+function parseTypedShortcut(text) {
+  const match = String(text || "").trim().toLowerCase().match(/^(growth|deep|work|life)(?:\s+(25|50))?$/);
+  if (!match) return null;
+  const area = match[1] === "growth" || match[1] === "deep"
+    ? "DEEP"
+    : match[1] === "work"
+      ? "WORK"
+      : "LIFE";
+  return { area, duration: match[2] ? Number(match[2]) : null };
+}
+
+async function beginShortcutFocus({ db, user, area, duration, googleTasks, now }) {
+  if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+  await syncTaskList({ db, googleTasks, now });
+  const date = cairoDateKey(now);
+  const outcome = await getDailyOutcome(db, date, area);
+  if (!outcome) {
+    await setConversationState(db, user.id, {
+      type: "outcome_define",
+      date,
+      area
+    }, now.toISOString());
+    return {
+      category: "Daily outcome",
+      title: `Set your ${areaLabel(area)} outcome`,
+      sections: [{ heading: "", lines: ["What does done look like, and when will you do it?"] }],
+      inputMode: "force_reply",
+      inputPlaceholder: "Describe one outcome"
+    };
+  }
+  if (duration) {
+    await setConversationState(db, user.id, {
+      type: "focus_duration",
+      date,
+      area,
+      nextAction: outcome.done_test || outcome.outcome,
+      googleTaskId: outcome.google_task_id
+    }, now.toISOString());
+    return handleShortcutDurationAction({ db, user, outcome, duration, now });
+  }
+  return beginOutcomeSprint({ db, user, outcome, now });
+}
+
+async function handleShortcutDurationAction({ db, user, outcome, duration, now }) {
+  const dueAt = new Date(now.getTime() + duration * 60_000);
+  await recordFocusSession(db, {
+    id: `FOCUS-${crypto.randomUUID()}`,
+    userId: user.id,
+    chatId: String(user.external_user_id),
+    date: cairoDateKey(now),
+    area: outcome.area,
+    googleTaskId: outcome.google_task_id,
+    nextAction: outcome.done_test || outcome.outcome,
+    durationMinutes: duration,
+    startedAt: now.toISOString(),
+    dueAt: dueAt.toISOString()
+  });
+  await clearConversationState(db, user.id);
+  return response(
+    "Focus block",
+    `${duration}-minute ${areaLabel(outcome.area)} focus block started. Follow-up: ${timeLabel(dueAt)} Cairo time.`
+  );
+}
+
+function parseQuickCapture(text, now) {
+  const match = String(text || "").trim().match(/^add\s+(.+)$/i);
+  if (!match) return null;
+  let rest = match[1].trim();
+  const priorityMatch = rest.match(/\s+(high|medium|low)$/i);
+  const priority = priorityMatch ? titleCase(priorityMatch[1]) : "Medium";
+  if (priorityMatch) rest = rest.slice(0, priorityMatch.index).trim();
+  let dueDate = "";
+  const relative = rest.match(/\s+(today|tomorrow)$/i);
+  if (relative) {
+    dueDate = parseDateInput(relative[1], now) || "";
+    rest = rest.slice(0, relative.index).trim();
+  } else {
+    const namedDate = rest.match(/\s+(11\/25(?:\/2026)?|[A-Za-z]+\s+\d{1,2}(?:,\s*\d{4})?|2026-\d{2}-\d{2})$/);
+    if (namedDate) {
+      dueDate = parseDateInput(namedDate[1], now) || "";
+      if (dueDate) rest = rest.slice(0, namedDate.index).trim();
+    }
+  }
+  if (!rest) return null;
+  return {
+    title: rest.slice(0, 500),
+    area: "WORK",
+    priority,
+    dueDate
+  };
+}
+
+async function createQuickCapturedTask({ db, user, googleTasks, capture, now }) {
+  if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+  return createCapturedTask({
+    db,
+    user,
+    state: {
+      requestId: `TASK-QUICK-${crypto.randomUUID()}`,
+      title: capture.title,
+      area: capture.area,
+      priority: capture.priority,
+      dueDate: capture.dueDate,
+      doneTest: "Complete the named next action."
+    },
+    addToTop3: false,
+    googleTasks,
+    now,
+    clearConversation: false
+  });
+}
+
+function parseQuietDuration(text) {
+  const match = String(text || "").trim().match(/^(\d+(?:\.\d+)?)h$/i);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  if (!Number.isFinite(hours) || hours <= 0 || hours > 24) return null;
+  return Math.round(hours * 60);
+}
+
+async function showNextRecommendation({ db, user, now }) {
+  const date = cairoDateKey(now);
+  const outcomes = await db.prepare(
+    `SELECT area, outcome, status
+       FROM daily_outcomes
+      WHERE outcome_date = ?1
+      ORDER BY updated_at DESC, rowid DESC`
+  ).bind(date).all();
+  const latest = new Map();
+  for (const row of outcomes.results) {
+    if (!latest.has(row.area)) latest.set(row.area, row);
+  }
+  const openAreas = ["DEEP", "WORK", "LIFE"].filter(area => {
+    const outcome = latest.get(area);
+    return outcome && !["Completed", "Dropped"].includes(outcome.status);
+  });
+  if (!openAreas.length) {
+    return response("Next", say("tasks_clear", { now }));
+  }
+  const hour = Number(cairoTimeParts(now).hour);
+  const area = hour < 14
+    ? (openAreas.includes("DEEP") ? "DEEP" : openAreas[0])
+    : hour >= 14 && hour < 15
+      ? (openAreas.includes("WORK") ? "WORK" : openAreas[0])
+      : hour >= 23
+        ? (openAreas.includes("LIFE") ? "LIFE" : openAreas[0])
+        : openAreas[0];
+  const outcome = latest.get(area);
+  const duration = await getDefaultFocusDuration(db, user.id, area, now);
+  return {
+    category: "Next",
+    title: "Next",
+    sections: [{ heading: "", lines: [`Next: ${outcome.outcome} · ${duration} min`] }],
+    actions: [[
+      { label: "Start", action: `start_outcome|${area}` },
+      { label: "Other", action: "focus_now" }
+    ]]
+  };
+}
+
+async function getDefaultFocusDuration(db, userId, area, now) {
+  const start = shiftDateKey(cairoDateKey(now), -14);
+  const result = await db.prepare(
+    `SELECT duration_minutes, COUNT(*) AS count
+       FROM focus_sessions
+      WHERE user_id = ?1 AND area = ?2
+        AND substr(started_at, 1, 10) >= ?3
+      GROUP BY duration_minutes
+      ORDER BY count DESC, duration_minutes DESC
+      LIMIT 1`
+  ).bind(userId, area, start).first();
+  return result && (Number(result.duration_minutes) === 25 || Number(result.duration_minutes) === 50)
+    ? Number(result.duration_minutes)
+    : 25;
+}
+
+async function showPulseStatus(db, userId, now) {
+  const date = cairoDateKey(now);
+  const result = await db.prepare(
+    `SELECT slot, status, reason, nudge_count, sent_at
+       FROM work_pulses
+      WHERE user_id = ?1 AND cairo_date = ?2
+      ORDER BY scheduled_at`
+  ).bind(userId, date).all();
+  const lines = result.results.length
+    ? result.results.map(row => `${row.slot}: ${row.status}${row.reason ? ` · ${row.reason}` : ""}${row.nudge_count ? ` · ${row.nudge_count} nudge` : ""}`)
+    : ["No pulses sent today."];
+  return response("Work pulses", lines.join("\n"));
+}
+
+function titleCase(value) {
+  return String(value).charAt(0).toUpperCase() + String(value).slice(1).toLower();
+}
+
+async function handlePulseAction({ db, user, identifier, googleTasks, now }) {
+  const parts = identifier.split("|");
+  const type = parts[1];
+  const area = parts[parts.length - 1];
+  await db.prepare(
+    `UPDATE work_pulses
+        SET status = 'answered', response = ?1
+      WHERE user_id = ?2 AND cairo_date = ?3 AND status = 'sent'`
+  ).bind(type, user.id, cairoDateKey(now)).run();
+  if (type === "reason") {
+    const reason = parts[2];
+    const text = say(`reason_${reason}`, { now, task: "this task" });
+    return {
+      category: "Pulse response",
+      title: "",
+      sections: [{ heading: "", lines: [text] }],
+      actions: reason === "too_big"
+        ? [[{ label: "Start 25 min", action: `start_outcome|${area}` }, { label: "Keep as is", action: "home" }]]
+        : reason === "low_energy"
+          ? [[{ label: "Start 25 min", action: `start_outcome|${area}` }, { label: "Tomorrow", action: "tomorrow" }]]
+          : reason === "pulled_away"
+            ? [[{ label: "Start now", action: `start_outcome|${area}` }, { label: "Move it", action: "tomorrow" }]]
+            : reason === "forgot"
+              ? [[{ label: "Start now", action: `start_outcome|${area}` }]]
+              : [[
+                  { label: "Keep", action: "home" },
+                  { label: "Reschedule", action: "tomorrow" },
+                  { label: "Drop today's outcome", action: `outcome_drop|${cairoDateKey(now)}|${area}` }
+                ]]
+    };
+  }
+  if (type === "done") {
+    const outcome = await getDailyOutcome(db, cairoDateKey(now), area);
+    if (outcome && outcome.google_task_id && googleTasks) {
+      const task = await db.prepare("SELECT status FROM tasks WHERE google_task_id = ?1")
+        .bind(outcome.google_task_id).first();
+      if (task && task.status === "Pending") {
+        const completed = await googleTasks.complete(outcome.google_task_id);
+        await upsertGoogleTaskMirror(db, completed, now.toISOString());
+        return response("Pulse completed", say("done_one", { name: await getDisplayName(db), task: outcome.outcome, now }));
+      }
+    }
+    return response("Pulse recorded", "Task status remains unchanged until Google Tasks confirms completion.");
+  }
+  if (type === "switch") return beginFocusNow({ db, user, now });
+  if (type === "blocked") return {
+    category: "Pulse blocked",
+    title: "What is blocking it?",
+    sections: [],
+    actions: [[
+      { label: "Unclear next step", action: `fr|none|unclear` },
+      { label: "Low energy", action: `fr|none|energy` }
+    ], [{ label: "External dependency", action: `fr|none|external` }]]
+  };
+  return response("Pulse recorded", "Got it. No task status was changed.");
+}
+
 function response(category, text) {
   return {
     category,
     title: "",
     sections: [{ heading: "", lines: [text] }],
-    actions: []
+    actions: [],
+    replyKeyboard: ["▶ Next", "🗓 Plan", "➕ Add", "📋 Today"]
   };
 }
 
@@ -1802,19 +3505,48 @@ async function syncTaskList({ db, googleTasks, now }) {
       operation: "Synchronize task list",
       occurredAt: now.toISOString(),
       result: "Failed",
-      errorDetails: error && error.name ? String(error.name) : "Error"
+      errorDetails: formatGoogleErrorDetails(error)
     });
     throw error;
   }
 }
 
+function formatGoogleErrorDetails(error) {
+  if (error && error.oauthErrorCode) {
+    return `OAuth ${error.oauthErrorCode}${error.status ? ` (HTTP ${Number(error.status)})` : ""}`;
+  }
+  if (error && error.googleApiReason) {
+    return `Google API ${error.googleApiReason}${error.status ? ` (HTTP ${Number(error.status)})` : ""}`;
+  }
+  if (error && Number.isInteger(Number(error.status))) {
+    return `HTTP ${Number(error.status)}`;
+  }
+  return error && error.name ? String(error.name) : "Error";
+}
+
+function formatCalendarFailureGuidance(errorDetails) {
+  if (errorDetails && errorDetails.includes("insufficientPermissions")) {
+    return "Google denied Calendar access. Reauthorize the existing Google connection with the required Calendar scope.";
+  }
+  if (errorDetails && errorDetails.includes("accessNotConfigured")) {
+    return "Enable the Google Calendar API in the Cloud project used by the configured OAuth client.";
+  }
+  return "Check the Google Calendar API and the Calendar access granted to the configured Google account.";
+}
+
 function cairoDateKey(date) {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Africa/Cairo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).format(date);
+  return formattedCairoDateKey(date);
+}
+
+function formatCairoDateTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value || "Date unavailable");
+  return dateTimeLabel(date);
+}
+
+function truncate(value, limit) {
+  const text = String(value || "");
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
 function shiftDateKey(dateKey, days) {
@@ -1830,9 +3562,5 @@ function isValidDateKey(value) {
 }
 
 function formatCairoTime(date) {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Africa/Cairo",
-    hour: "2-digit",
-    minute: "2-digit"
-  }).format(date);
+  return timeLabel(date);
 }

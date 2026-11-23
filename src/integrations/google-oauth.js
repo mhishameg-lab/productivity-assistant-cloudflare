@@ -1,5 +1,14 @@
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const accessTokenCache = new Map();
+const SAFE_OAUTH_ERROR_CODES = new Set([
+  "access_denied",
+  "invalid_client",
+  "invalid_grant",
+  "invalid_request",
+  "invalid_scope",
+  "unauthorized_client",
+  "unsupported_grant_type"
+]);
 
 export function createGoogleAccessTokenProvider(env, fetchImpl = fetch, clock = () => Date.now()) {
   const required = [
@@ -29,7 +38,23 @@ export function createGoogleAccessTokenProvider(env, fetchImpl = fetch, clock = 
       body
     });
     if (!response.ok) {
-      throw new Error(`Google OAuth token refresh failed with HTTP ${response.status}.`);
+      let oauthErrorCode = null;
+      try {
+        const errorBody = await response.json();
+        if (errorBody && SAFE_OAUTH_ERROR_CODES.has(errorBody.error)) {
+          oauthErrorCode = errorBody.error;
+        }
+      } catch {
+        oauthErrorCode = null;
+      }
+      const suffix = oauthErrorCode ? ` (${oauthErrorCode})` : "";
+      const error = new Error(
+        `Google OAuth token refresh failed with HTTP ${response.status}${suffix}.`
+      );
+      error.status = response.status;
+      error.oauthRefreshFailure = true;
+      if (oauthErrorCode) error.oauthErrorCode = oauthErrorCode;
+      throw error;
     }
 
     const result = await response.json();

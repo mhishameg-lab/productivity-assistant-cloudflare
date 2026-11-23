@@ -1,14 +1,26 @@
 import {
   insertChannelMessage,
   logSystemEvent,
+  logSyncEvent,
   setConversationState
 } from "./db/channel-repository.js";
+import { listDailyGoalFocus } from "./db/goal-repository.js";
+import { listPendingTaskPlanningCandidates, syncGoogleTaskMirrors } from "./db/google-tasks-repository.js";
 import { createTelegramApi } from "./channels/telegram-api.js";
 import { createGoogleCalendarClient } from "./integrations/google-calendar.js";
 import { createGoogleGmailClient } from "./integrations/google-gmail.js";
 import { createGoogleTasksClient } from "./integrations/google-tasks.js";
 import { processScheduledReports } from "./reports.js";
 import { processHighPriorityEscalations } from "./escalations.js";
+import {
+  processCalendarAppointmentReminders,
+  processOverdueTaskReminders
+} from "./reminders.js";
+import { buildDailyTaskPlan, formatDailyTaskPlan } from "./core/daily-planner.js";
+import { prioritizeReviewRecommendations } from "./ai/review-analyzer.js";
+import { areaLabel, cairoTimeParts as formatCairoTimeParts, longDate, timeLabel, weekdayDay } from "./core/format.js";
+import { getDisplayName, say } from "./core/voice.js";
+import { processWorkPulses } from "./pulses.js";
 
 const MAX_FOLLOWUPS_PER_RUN = 5;
 const MAX_FOLLOWUP_AGE_MS = 30 * 60 * 1000;
@@ -138,16 +150,40 @@ export async function handleScheduledEvent(controller, env, ctx) {
   const gmail = env.GOOGLE_GMAIL_ENABLED === "true"
     ? createGoogleGmailClient(env)
     : null;
+  const aiEnabled =
+    env.AI_ENABLED === "true" &&
+    env.AI_FREE_PLAN_CONFIRMED === "true" &&
+    Boolean(env.AI);
+  const aiReviewRecommendations = aiEnabled
+    ? ({ report, metrics }) => prioritizeReviewRecommendations({
+        db: env.DB,
+        ai: env.AI,
+        report,
+        metrics,
+        now,
+        model: env.AI_MODEL || undefined,
+        dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
+      })
+    : null;
   const focus = await processDueFocusSessions({
     db: env.DB,
     telegram,
     now
+  });
+  const pulses = await processWorkPulses({
+    db: env.DB,
+    telegram,
+    now,
+    authorizedTelegramUserId: env.AUTHORIZED_TELEGRAM_USER_ID,
+    googleCalendar,
+    enabled: env.WORK_PULSES_ENABLED === "true"
   });
   const rhythm = await processScheduledRhythm({
     db: env.DB,
     telegram,
     now,
     authorizedTelegramUserId: env.AUTHORIZED_TELEGRAM_USER_ID,
+    googleTasks,
     googleCalendar
   });
   const reports = await processScheduledReports({
@@ -155,6 +191,9 @@ export async function handleScheduledEvent(controller, env, ctx) {
     googleTasks,
     gmail,
     recipient: env.PRODUCTIVITY_EMAIL_RECIPIENT,
+    aiReviewRecommendations,
+    htmlEmailsEnabled: env.HTML_EMAILS_ENABLED === "true",
+    displayName: "Mohamed",
     now
   });
   const escalations = await processHighPriorityEscalations({
@@ -162,10 +201,27 @@ export async function handleScheduledEvent(controller, env, ctx) {
     googleTasks,
     gmail,
     recipient: env.PRODUCTIVITY_EMAIL_RECIPIENT,
+    htmlEmailsEnabled: env.HTML_EMAILS_ENABLED === "true",
     now,
     enabled: env.EMAIL_ESCALATIONS_ENABLED === "true"
   });
-  return { focus, rhythm, reports, escalations };
+  const calendarReminders = await processCalendarAppointmentReminders({
+    db: env.DB,
+    telegram,
+    googleCalendar,
+    authorizedTelegramUserId: env.AUTHORIZED_TELEGRAM_USER_ID,
+    now,
+    enabled: env.CALENDAR_REMINDERS_ENABLED === "true"
+  });
+  await processOverdueTaskReminders({
+    db: env.DB,
+    telegram,
+    googleTasks,
+    authorizedTelegramUserId: env.AUTHORIZED_TELEGRAM_USER_ID,
+    now,
+    enabled: false
+  });
+  return { focus, pulses, rhythm, reports, escalations, calendarReminders };
 }
 
 async function performTelegramWebhookCutover(env, now) {
@@ -206,6 +262,25 @@ async function performTelegramWebhookCutover(env, now) {
       allowed_updates: ["message", "callback_query"],
       drop_pending_updates: false
     });
+    await telegram.setMyCommands([
+      { command: "start", description: "Daily plan" },
+      { command: "today", description: "Today card" },
+      { command: "tomorrow", description: "Tomorrow plan" },
+      { command: "tasks", description: "Open tasks" },
+      { command: "overdue", description: "Overdue tasks" },
+      { command: "inbox", description: "Unread inbox" },
+      { command: "accountability", description: "Trello and Obsidian check-in" },
+      { command: "goals", description: "Review goals" },
+      { command: "goal", description: "Create a goal" },
+      { command: "addtask", description: "Add a task" },
+      { command: "focus", description: "Start a focus block" },
+      { command: "available", description: "Plan available time" },
+      { command: "weekly", description: "Weekly review" },
+      { command: "monthly", description: "Monthly project review" },
+      { command: "quiet", description: "Mute proactive pulses" },
+      { command: "pulses", description: "Today's pulse status" },
+      { command: "help", description: "Assistant help" }
+    ]);
     const info = await telegram.call("getWebhookInfo", {});
     if (info.url !== env.TELEGRAM_WEBHOOK_URL) {
       throw new Error("Telegram did not report the configured production webhook URL.");
@@ -264,6 +339,7 @@ export async function processScheduledRhythm({
   telegram,
   now,
   authorizedTelegramUserId,
+  googleTasks = null,
   googleCalendar = null
 }) {
   const parts = cairoDateTimeParts(now);
@@ -274,11 +350,18 @@ export async function processScheduledRhythm({
     "14:15": "work_briefing",
     "23:00": "shutdown",
     "23:20": "next_day_planning",
+    "23:40": "planning_1",
     "00:00": "planning_1",
     "00:20": "planning_2",
     "00:45": "planning_3"
   }[time];
   if (!dueJob) return { sent: 0, skipped: 0 };
+  const weekdayName = formatCairoTimeParts(now).weekday;
+  const weekday = weekdayName === "Sat" ? 6 : weekdayName === "Sun" ? 0 : null;
+  if ((weekday === 6 || weekday === 0) &&
+      (dueJob === "work_briefing" || dueJob === "shutdown")) {
+    return { sent: 0, skipped: 1 };
+  }
 
   if (dueJob.startsWith("planning_")) {
     const review = await db.prepare(
@@ -312,8 +395,40 @@ export async function processScheduledRhythm({
   if (!claimed) return { sent: 0, skipped: 1 };
 
   try {
-    const message = await buildRhythmMessage({ db, target, dueJob, date, now, googleCalendar });
+    const message = await buildRhythmMessage({
+      db,
+      target,
+      dueJob,
+      date,
+      now,
+      googleTasks,
+      googleCalendar
+    });
     const delivered = await telegram.sendAssistantResponse(target.chatId, message);
+    if (dueJob === "morning") {
+      try {
+        await telegram.pinChatMessage(target.chatId, delivered.message_id);
+        await db.prepare(
+          `INSERT INTO today_cards (
+             user_id, cairo_date, telegram_chat_id, telegram_message_id, updated_at
+           ) VALUES (?1, ?2, ?3, ?4, ?5)
+           ON CONFLICT(user_id) DO UPDATE SET
+             cairo_date = excluded.cairo_date,
+             telegram_chat_id = excluded.telegram_chat_id,
+             telegram_message_id = excluded.telegram_message_id,
+             updated_at = excluded.updated_at`
+        ).bind(target.userId, date, target.chatId, String(delivered.message_id), now.toISOString()).run();
+      } catch (error) {
+        await logSystemEvent(db, {
+          occurredAt: now.toISOString(),
+          severity: "WARN",
+          component: "Today card",
+          eventType: "Card pin failed",
+          description: "Morning card was sent but could not be pinned.",
+          errorMessage: error && error.message ? String(error.message).slice(0, 300) : "Pin failed"
+        });
+      }
+    }
     await insertChannelMessage(db, {
       channel: "telegram",
       conversationId: target.chatId,
@@ -382,24 +497,101 @@ async function findTelegramTarget(db, authorizedTelegramUserId) {
   return { userId: user.id, chatId: message.external_chat_id };
 }
 
-async function buildRhythmMessage({ db, target, dueJob, date, now, googleCalendar }) {
+async function buildRhythmMessage({ db, target, dueJob, date, now, googleTasks, googleCalendar }) {
   if (dueJob === "morning") {
     const outcomes = await getOutcomesForDate(db, date);
-    const calendarEvents = googleCalendar
-      ? await googleCalendar.listEventsForDate(date)
-      : null;
+    const name = await getDisplayName(db);
+    const goalFocus = await listDailyGoalFocus(db, target.userId, date);
+    let taskPlan = null;
+    let taskFailureMessage = googleTasks
+      ? "Task status could not be refreshed, so task priorities are omitted from this briefing."
+      : "Google Tasks is not configured, so task priorities are omitted from this briefing.";
+    if (googleTasks) {
+      let tasks = null;
+      try {
+        tasks = await googleTasks.listAll();
+        await syncGoogleTaskMirrors(db, tasks, now.toISOString());
+        await logSyncEvent(db, {
+          source: "Google Tasks",
+          operation: "Synchronize tasks for morning briefing",
+          occurredAt: now.toISOString(),
+          result: "Success",
+          relatedRecordId: `${tasks.length} task(s)`
+        });
+      } catch (error) {
+        await logSyncEvent(db, {
+          source: "Google Tasks",
+          operation: "Synchronize tasks for morning briefing",
+          occurredAt: now.toISOString(),
+          result: "Failed",
+          errorDetails: error && error.name ? String(error.name) : "Error"
+        });
+      }
+      if (tasks) {
+        try {
+          const candidates = await listPendingTaskPlanningCandidates(db, date);
+          taskPlan = buildDailyTaskPlan(candidates, date);
+        } catch (error) {
+          taskFailureMessage = "Task priorities could not be built, so they are omitted from this briefing.";
+          await logSystemEvent(db, {
+            occurredAt: now.toISOString(),
+            severity: "ERROR",
+            component: "Daily Planner",
+            eventType: "Morning task plan failed",
+            description: "Could not build task priorities for the morning briefing.",
+            errorMessage: error && error.name ? String(error.name) : "Error"
+          });
+        }
+      }
+    }
+    let calendarEvents = null;
+    let calendarErrorDetails = null;
+    if (googleCalendar) {
+      try {
+        calendarEvents = await googleCalendar.listEventsForDate(date);
+      } catch (error) {
+        calendarErrorDetails = formatCalendarErrorDetails(error);
+        await logSystemEvent(db, {
+          occurredAt: now.toISOString(),
+          severity: "WARN",
+          component: "Google Calendar",
+          eventType: "Calendar read failed",
+          description: "Could not retrieve events for the morning briefing.",
+          errorMessage: calendarErrorDetails
+        });
+      }
+    }
     return {
       category: "Morning briefing",
-      title: "Good morning.",
+      title: `Good morning, ${name}.`,
       sections: [
-        { heading: "Your three outcomes", lines: outcomes },
+        ...(outcomes.length
+          ? [{ heading: "Your three outcomes", lines: outcomes }]
+          : [{ heading: "", lines: [say("plan_unset", { now })] }]),
+        ...(taskPlan
+          ? formatDailyTaskPlan(taskPlan, date)
+          : [{
+              heading: "Google Tasks",
+              lines: [taskFailureMessage]
+            }]),
+        {
+          heading: "Goal-aligned next actions",
+          lines: goalFocus.length
+            ? goalFocus.map(goal => formatGoalFocus(goal, date))
+            : ["No objectives defined yet. Use /goal when ready."]
+        },
         {
           heading: "Calendar",
           lines: calendarEvents
             ? calendarEvents.length
               ? calendarEvents.map(formatCalendarEvent)
               : ["No appointments today."]
-            : ["Calendar integration is disabled until OAuth access is authorized."]
+            : calendarErrorDetails
+              ? [
+                  `Calendar unavailable (${calendarErrorDetails}).`,
+                  "Your task plan is still available; verify Calendar access separately."
+                ]
+              : ["Calendar integration is disabled until OAuth access is authorized."]
         },
         { heading: "", lines: ["What do you want to move forward now?"] }
       ],
@@ -412,7 +604,8 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleCalenda
         [
           { label: "Add something", action: "add_task" },
           { label: "Show full plan", action: "plan_my_day" }
-        ]
+        ],
+        [{ label: "Review goals", action: "goals_show" }]
       ]
     };
   }
@@ -426,8 +619,8 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleCalenda
     }, now.toISOString());
     return {
       category: "Work briefing",
-      title: "14:15 work pre-shift",
-      sections: [{ heading: "", lines: ["What is your SDR target for this shift?"] }],
+      title: `${timeLabel(new Date(now))} work pre-shift`,
+      sections: [{ heading: "", lines: [say("preshift_1", { name: await getDisplayName(db), now })] }],
       inputMode: "force_reply",
       inputPlaceholder: "One concrete target"
     };
@@ -436,8 +629,8 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleCalenda
   if (dueJob === "shutdown") {
     return {
       category: "Daily shutdown",
-      title: "23:00 shutdown",
-      sections: [{ heading: "", lines: ["Capture open loops in Google Tasks, or confirm there are none. Tomorrow’s guided planning starts at 23:20."] }],
+      title: `${timeLabel(now)} shutdown`,
+      sections: [{ heading: "", lines: [say("shutdown", { name: await getDisplayName(db), now })] }],
       actions: [
         [{ label: "Add an open loop", action: "add_task" }],
         [{ label: "No open loops now", action: "shutdown_done" }]
@@ -455,8 +648,8 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleCalenda
     }, now.toISOString(), 7200);
     return {
       category: "Next-day planning",
-      title: "Plan tomorrow — 1/5",
-      sections: [{ heading: "", lines: ["What got DONE today?"] }],
+      title: "Plan tomorrow",
+      sections: [{ heading: "", lines: [say("plan_tomorrow_prompt", { now })] }],
       inputMode: "force_reply",
       inputPlaceholder: "One useful win"
     };
@@ -479,9 +672,32 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleCalenda
   };
 }
 
+function formatGoalFocus(goal, date) {
+  const levels = {
+    life_vision: "Life vision",
+    annual: "Annual objective",
+    quarterly: "Quarterly objective",
+    monthly: "Monthly milestone",
+    weekly: "Weekly outcome"
+  };
+  const progress = goal.progress_fraction == null
+    ? ""
+    : ` · measured ${Math.round(goal.progress_fraction * 100)}%`;
+  const deadline = goal.deadline
+    ? ` · deadline ${goal.deadline}${goal.deadline < date ? " (passed)" : ""}`
+    : "";
+  return `${levels[goal.level] || goal.level}: ${goal.title}${progress}${deadline}\nNext: ${goal.next_action}`;
+}
+
 function formatCalendarEvent(event) {
   if (event.allDay) return `All day · ${event.title}`;
   return `${event.start}–${event.end} · ${event.title}`;
+}
+
+function formatCalendarErrorDetails(error) {
+  const reason = error && error.googleApiReason ? ` ${error.googleApiReason}` : "";
+  const status = error && error.status ? ` (HTTP ${Number(error.status)})` : "";
+  return `Google Calendar${reason}${status}`;
 }
 
 async function getOutcomesForDate(db, date) {
@@ -497,21 +713,14 @@ async function getOutcomesForDate(db, date) {
   }
   return ["DEEP", "WORK", "LIFE"].map((area, index) => {
     const outcome = latest.get(area);
-    return `${index + 1}. ${area} — ${outcome ? outcome.outcome : "Not set yet"}${outcome && outcome.status !== "Planned" ? ` (${outcome.status})` : ""}`;
-  });
+    if (!outcome) return null;
+    const status = outcome.status !== "Planned" ? ` (${outcome.status})` : "";
+    return `${index + 1}. ${areaLabel(area)} — ${outcome.outcome}${status}`;
+  }).filter(Boolean);
 }
 
 function cairoDateTimeParts(date) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Africa/Cairo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23"
-  }).formatToParts(date);
-  return Object.fromEntries(parts.filter(part => part.type !== "literal").map(part => [part.type, part.value]));
+  return formatCairoTimeParts(date);
 }
 
 function shiftDateKey(dateKey, days) {

@@ -35,7 +35,71 @@ export function createTelegramApi(token, fetchImpl = fetch) {
       });
     },
 
+    editMessageText(chatId, messageId, text, replyMarkup) {
+      return this.call("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text,
+        parse_mode: "HTML",
+        ...(replyMarkup ? { reply_markup: replyMarkup } : {})
+      });
+    },
+
+    pinChatMessage(chatId, messageId) {
+      return this.call("pinChatMessage", {
+        chat_id: chatId,
+        message_id: messageId,
+        disable_notification: true
+      });
+    },
+
+    unpinChatMessage(chatId, messageId) {
+      return this.call("unpinChatMessage", {
+        chat_id: chatId,
+        ...(messageId ? { message_id: messageId } : {})
+      });
+    },
+
+    setMyCommands(commands) {
+      return this.call("setMyCommands", { commands });
+    },
+
     sendAssistantResponse(chatId, response) {
+      const sections = (response.sections || []).map(section => {
+        const heading = section.heading
+          ? `<b>${escapeTelegramHtml(section.heading)}</b>\n`
+          : "";
+        const lines = (section.lines || []).map(escapeTelegramHtml).join("\n");
+        return `${heading}${lines}`;
+      }).filter(Boolean);
+      const text = [
+        response.title ? `<b>${escapeTelegramHtml(response.title)}</b>` : "",
+        ...sections
+      ].filter(Boolean).join("\n\n");
+      const replyMarkup = response.replyKeyboard
+        ? {
+            keyboard: [response.replyKeyboard.map(text => ({ text }))],
+            resize_keyboard: true,
+            is_persistent: true
+          }
+        : response.actions && response.actions.length
+        ? {
+            inline_keyboard: response.actions.map(row => row.map(action => ({
+              text: action.label,
+              callback_data: action.action
+            })))
+          }
+        : response.inputMode === "force_reply"
+          ? {
+              force_reply: true,
+              selective: true,
+              input_field_placeholder: response.inputPlaceholder || "Type one short answer"
+            }
+          : null;
+      return this.sendMessage(chatId, text || " ", replyMarkup);
+    },
+
+    editAssistantResponse(chatId, messageId, response) {
       const sections = (response.sections || []).map(section => {
         const heading = section.heading
           ? `<b>${escapeTelegramHtml(section.heading)}</b>\n`
@@ -61,7 +125,7 @@ export function createTelegramApi(token, fetchImpl = fetch) {
               input_field_placeholder: response.inputPlaceholder || "Type one short answer"
             }
           : null;
-      return this.sendMessage(chatId, text || " ", replyMarkup);
+      return this.editMessageText(chatId, messageId, text || " ", replyMarkup);
     },
 
     answerCallbackQuery(callbackQueryId, text) {

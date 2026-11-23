@@ -10,8 +10,21 @@ import {
   logSystemEvent
 } from "./db/channel-repository.js";
 import { createGoogleCalendarClient } from "./integrations/google-calendar.js";
+import { createGoogleGmailClient } from "./integrations/google-gmail.js";
 import { createGoogleTasksClient } from "./integrations/google-tasks.js";
+import { classifyNaturalLanguageIntent } from "./ai/intent-classifier.js";
+import { prioritizeDailyTasks } from "./ai/daily-prioritizer.js";
+import { analyzeEmailFollowUps } from "./ai/email-followups.js";
 import { handleScheduledEvent } from "./scheduled.js";
+import {
+  addTaskPageHtml,
+  miniAppResponse,
+  planPageHtml,
+  validateTelegramInitData
+} from "./core/miniapp.js";
+import { cairoDateKey, shiftDateKey, shortDate } from "./core/format.js";
+import { upsertGoogleTaskMirror } from "./db/google-tasks-repository.js";
+import { createPlannedOutcomeTask } from "./core/assistant.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8" };
@@ -47,6 +60,50 @@ export default {
         productionTrafficEnabled,
         databaseConfigured: Boolean(env.DB)
       });
+    }
+
+    if (url.pathname.startsWith("/app/")) {
+      if (env.MINI_APP_ENABLED !== "true") {
+        return jsonResponse({ error: "Mini App is disabled." }, 404);
+      }
+      if (!env.DB) return jsonResponse({ error: "D1 database binding is not configured." }, 503);
+      if (request.method === "GET" && (url.pathname === "/app/plan" || url.pathname === "/app/add")) {
+        const nameRow = await env.DB.prepare(
+          "SELECT setting_value FROM settings WHERE setting_key = 'display_name'"
+        ).first();
+        const name = nameRow && nameRow.setting_value ? nameRow.setting_value : "Mohamed";
+        return miniAppResponse(
+          url.pathname === "/app/plan" ? planPageHtml(name) : addTaskPageHtml(name)
+        );
+      }
+      if (url.pathname === "/app/api/bootstrap" && request.method === "GET") {
+        const authorized = await authorizeMiniAppRequest(request, env);
+        if (!authorized) return jsonResponse({ error: "Unauthorized" }, 401);
+        const date = cairoDateKey(new Date());
+        const [settings, outcomes, tasks] = await Promise.all([
+          env.DB.prepare("SELECT setting_key, setting_value FROM settings").all(),
+          env.DB.prepare("SELECT area, outcome, status FROM daily_outcomes WHERE outcome_date = ?1").bind(date).all(),
+          env.DB.prepare("SELECT id, title, area, status FROM tasks WHERE status = 'Pending' ORDER BY due_date IS NULL, due_date, title LIMIT 50").all()
+        ]);
+        return jsonResponse({
+          date,
+          dateLabel: shortDate(date),
+          settings: Object.fromEntries(settings.results.map(row => [row.setting_key, row.setting_value])),
+          outcomes: outcomes.results,
+          tasks: tasks.results
+        });
+      }
+      if (url.pathname === "/app/api/plan" && request.method === "POST") {
+        const authorized = await authorizeMiniAppRequest(request, env);
+        if (!authorized) return jsonResponse({ error: "Unauthorized" }, 401);
+        return saveMiniAppPlan(request, env);
+      }
+      if (url.pathname === "/app/api/task" && request.method === "POST") {
+        const authorized = await authorizeMiniAppRequest(request, env);
+        if (!authorized) return jsonResponse({ error: "Unauthorized" }, 401);
+        return saveMiniAppTask(request, env);
+      }
+      return jsonResponse({ error: "Not found" }, 404);
     }
 
     if (url.pathname !== "/webhooks/telegram" || request.method !== "POST") {
@@ -144,6 +201,9 @@ export default {
       const googleTasks = hasGoogleTasksConfig(env)
         ? createGoogleTasksClient(env)
         : null;
+      const googleGmail = env.GOOGLE_GMAIL_READ_ENABLED === "true"
+        ? createGoogleGmailClient(env)
+        : null;
       const calendarClient = env.GOOGLE_CALENDAR_ENABLED === "true"
         ? createGoogleCalendarClient(env)
         : null;
@@ -155,21 +215,80 @@ export default {
               : {})
           }
         : null;
+      const aiEnabled =
+        env.AI_ENABLED === "true" &&
+        env.AI_FREE_PLAN_CONFIRMED === "true" &&
+        Boolean(env.AI);
+      const naturalLanguageClassifier = aiEnabled
+        ? text => classifyNaturalLanguageIntent({
+              db: env.DB,
+              ai: env.AI,
+              text,
+              now,
+              model: env.AI_MODEL || undefined,
+              dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
+            })
+        : null;
+      const aiDailyPlanner = aiEnabled
+        ? ({ date, tasks, goals }) => prioritizeDailyTasks({
+            db: env.DB,
+            ai: env.AI,
+            date,
+            tasks,
+            goals,
+            now,
+            model: env.AI_MODEL || undefined,
+            dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
+          })
+        : null;
+      const emailFollowUpAnalyzer =
+        aiEnabled &&
+        googleGmail &&
+        env.GMAIL_AI_ANALYSIS_ENABLED === "true"
+          ? threads => analyzeEmailFollowUps({
+              db: env.DB,
+              ai: env.AI,
+              threads,
+              now,
+              model: env.AI_MODEL || undefined,
+              dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
+            })
+          : null;
       const result = await handleAssistantMessage({
         db: env.DB,
         user,
         message,
         googleTasks,
         googleCalendar,
+        googleGmail,
+        naturalLanguageClassifier,
+        aiDailyPlanner,
+        emailFollowUpAnalyzer,
         now
       });
 
       let deliveredMessage = null;
       if (result) {
-        deliveredMessage = await telegram.sendAssistantResponse(
-          message.conversation.externalId,
-          result
-        );
+        if (message.action && message.message.externalId) {
+          try {
+            deliveredMessage = await telegram.editAssistantResponse(
+              message.conversation.externalId,
+              Number(message.message.externalId),
+              result
+            );
+          } catch (error) {
+            await logFailure(env.DB, message.id, "Telegram message edit failed; sent a new message", error, env);
+            deliveredMessage = await telegram.sendAssistantResponse(
+              message.conversation.externalId,
+              result
+            );
+          }
+        } else {
+          deliveredMessage = await telegram.sendAssistantResponse(
+            message.conversation.externalId,
+            result
+          );
+        }
       }
       if (message.action) {
         await insertChannelAction(env.DB, {
@@ -202,7 +321,7 @@ export default {
       try {
         const notice = await telegram.sendMessage(
           message.conversation.externalId,
-          "<b>I couldn't confirm that action.</b>\n\nCheck Google Tasks and this chat before repeating it. Your existing production bot has not been changed."
+          formatFailureNotice(error)
         );
         await insertChannelMessage(env.DB, {
           channel: message.channel,
@@ -234,6 +353,141 @@ export default {
     }
   }
 };
+
+function formatFailureNotice(error) {
+  if (error && error.oauthErrorCode === "invalid_grant") {
+    return "<b>Google authorization needs attention.</b>\n\nGoogle rejected the saved refresh grant. Reauthorize Google and update the existing OAuth refresh token directly in Cloudflare. Never send credentials in this chat. No task status was changed.";
+  }
+  if (error && error.oauthErrorCode === "invalid_client") {
+    return "<b>Google authorization needs attention.</b>\n\nGoogle rejected the OAuth client credentials. Correct the existing client credentials directly in Cloudflare. Never send credentials in this chat. No task status was changed.";
+  }
+  if (error && error.oauthRefreshFailure) {
+    const status = Number.isInteger(Number(error.status)) ? ` (HTTP ${Number(error.status)})` : "";
+    return `<b>Google authorization needs attention.</b>\n\nGoogle could not refresh the saved OAuth credentials${status}. Review the existing Google OAuth values directly in Cloudflare. Never send credentials in this chat. No Google API operation was performed.`;
+  }
+  if (error && error.integration === "Google Calendar" && Number(error.status) === 403) {
+    return "<b>Google Calendar access was denied.</b>\n\nCheck the Calendar API and the Calendar access granted to the configured Google account. Task management remains available; check Calendar before retrying any event action.";
+  }
+  return "<b>I couldn't complete that request.</b>\n\nCheck the connected service and verify whether the requested change took effect before retrying.";
+}
+
+async function authorizeMiniAppRequest(request, env) {
+  const initData = request.headers.get("X-Telegram-Init-Data");
+  if (!initData || !env.TELEGRAM_BOT_TOKEN) return null;
+  return validateTelegramInitData(initData, env.TELEGRAM_BOT_TOKEN, env.AUTHORIZED_TELEGRAM_USER_ID);
+}
+
+async function saveMiniAppPlan(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON." }, 400);
+  }
+  if (!body || typeof body.requestId !== "string" || body.requestId.length > 128) {
+    return jsonResponse({ error: "A request id is required." }, 400);
+  }
+  const existing = await env.DB.prepare(
+    "SELECT google_task_id FROM mini_app_requests WHERE id = ?1"
+  ).bind(body.requestId).first();
+  if (existing) return jsonResponse({ ok: true, duplicate: true });
+  await env.DB.prepare(
+    `INSERT INTO mini_app_requests (id, created_at, status)
+     VALUES (?1, ?2, 'Processing')`
+  ).bind(body.requestId, new Date().toISOString()).run();
+
+  const now = new Date();
+  const date = body.mode === "tomorrow"
+    ? shiftDateKey(cairoDateKey(now), 1)
+    : cairoDateKey(now);
+  const areas = [
+    ["DEEP", body.growth],
+    ["WORK", body.work],
+    ["LIFE", body.life]
+  ];
+  const googleTasks = hasGoogleTasksConfig(env) ? createGoogleTasksClient(env) : null;
+  for (const [area, outcome] of areas) {
+    if (!outcome || !String(outcome).trim()) continue;
+    let googleTaskId = null;
+    if (googleTasks) {
+      const task = await createPlannedOutcomeTask({
+        db: env.DB,
+        googleTasks,
+        requestId: `${body.requestId}-${area}`,
+        title: String(outcome).trim().slice(0, 500),
+        area,
+        priority: area === "LIFE" ? "Medium" : "High",
+        dueDate: date,
+        risk: body.risk ? String(body.risk).trim().slice(0, 1000) : "",
+        now
+      });
+      googleTaskId = task.id;
+    } else {
+      await env.DB.prepare(
+        "UPDATE mini_app_requests SET status = 'Needs review', error_details = 'Google Tasks unavailable.' WHERE id = ?1"
+      ).bind(body.requestId).run();
+      return jsonResponse({ error: "Google Tasks is unavailable." }, 503);
+    }
+    await env.DB.prepare(
+      `INSERT INTO daily_outcomes (
+         id, outcome_date, area, outcome, done_test, google_task_id, status, updated_at
+       ) VALUES (?1, ?2, ?3, ?4, '', ?5, 'Planned', ?6)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(`OUT-${body.requestId}-${area}`, date, area, String(outcome).trim().slice(0, 500), googleTaskId, now.toISOString()).run();
+  }
+  if (body.risk) {
+    await env.DB.prepare(
+      `INSERT INTO review_notes (id, review_type, review_date, question, answer, created_at)
+       VALUES (?1, 'Daily planning', ?2, 'What could derail this day?', ?3, ?4)`
+    ).bind(`RISK-${body.requestId}`, date, String(body.risk).trim().slice(0, 1000), now.toISOString()).run();
+  }
+  await env.DB.prepare(
+    "UPDATE mini_app_requests SET status = 'Completed' WHERE id = ?1"
+  ).bind(body.requestId).run();
+  return jsonResponse({ ok: true });
+}
+
+async function saveMiniAppTask(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON." }, 400);
+  }
+  if (!body || typeof body.requestId !== "string" || body.requestId.length > 128 ||
+      typeof body.title !== "string" || !body.title.trim()) {
+    return jsonResponse({ error: "Request id and title are required." }, 400);
+  }
+  const marker = await env.DB.prepare(
+    "SELECT google_task_id FROM mini_app_requests WHERE id = ?1"
+  ).bind(body.requestId).first();
+  if (marker) return jsonResponse({ ok: true, duplicate: true });
+  if (!hasGoogleTasksConfig(env)) {
+    return jsonResponse({ error: "Google Tasks is unavailable." }, 503);
+  }
+  const allowedAreas = new Set(["DEEP", "WORK", "LIFE", "Admin", "Other"]);
+  const allowedPriorities = new Set(["High", "Medium", "Low"]);
+  const area = allowedAreas.has(body.area) ? body.area : "WORK";
+  const priority = allowedPriorities.has(body.priority) ? body.priority : "Medium";
+  const today = cairoDateKey(new Date());
+  const finalDue = body.due === "today"
+    ? today
+    : body.due === "tomorrow"
+      ? shiftDateKey(today, 1)
+      : "";
+  await env.DB.prepare(
+    `INSERT INTO mini_app_requests (id, created_at, status)
+     VALUES (?1, ?2, 'Processing')`
+  ).bind(body.requestId, new Date().toISOString()).run();
+  const googleTasks = createGoogleTasksClient(env);
+  const notes = `Area: ${area}\nDone test: ${String(body.doneTest || "").trim()}`;
+  const created = await googleTasks.create(body.title.trim().slice(0, 500), notes, finalDue || null);
+  await upsertGoogleTaskMirror(env.DB, created, new Date().toISOString());
+  await env.DB.prepare(
+    "UPDATE mini_app_requests SET google_task_id = ?1, status = 'Completed' WHERE id = ?2"
+  ).bind(created.id || null, body.requestId).run();
+  return jsonResponse({ ok: true, googleTaskId: created.id });
+}
 
 function jsonResponse(body, status = 200) {
   return new Response(JSON.stringify(body), {

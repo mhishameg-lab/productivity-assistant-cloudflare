@@ -86,6 +86,8 @@ export async function upsertGoogleTaskMirror(db, googleTask, occurredAt, metadat
 
 function buildTaskWrite(db, task, occurredAt, metadata, existing, taskId, status, dueDate) {
   if (existing) {
+    const postponementIncrement = status === "Pending" &&
+      existing.due_date && dueDate && dueDate > existing.due_date ? 1 : 0;
     return db.prepare(
       `UPDATE tasks
           SET title = ?1,
@@ -95,7 +97,8 @@ function buildTaskWrite(db, task, occurredAt, metadata, existing, taskId, status
               priority = COALESCE(?5, priority),
               due_date = ?6,
               completed_at = ?7,
-              updated_at = ?8
+              updated_at = ?8,
+              postponement_count = postponement_count + ?10
         WHERE id = ?9`
     ).bind(
       String(task.title || ""),
@@ -106,7 +109,8 @@ function buildTaskWrite(db, task, occurredAt, metadata, existing, taskId, status
       dueDate,
       status === "Completed" ? (task.completed || null) : null,
       occurredAt,
-      taskId
+      taskId,
+      postponementIncrement
     );
   }
   return db.prepare(
@@ -172,6 +176,56 @@ export async function listPendingTaskMirrors(db, today, limit = 8, offset = 0) {
       LIMIT ?2 OFFSET ?3`
   ).bind(today, limit, offset).all();
 
+  return result.results;
+}
+
+export async function listPendingTaskPlanningCandidates(db, today, limit = 101) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(today))) {
+    throw new TypeError("Today must be a YYYY-MM-DD date key.");
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 101) {
+    throw new RangeError("Daily planning candidate limit is invalid.");
+  }
+  const result = await db.prepare(
+    `SELECT t.id, t.google_task_id, t.title, t.status, t.priority, t.due_date,
+            t.postponement_count,
+            COUNT(DISTINCT g.id) AS linked_goal_count,
+            MIN(g.title) AS linked_goal_title
+       FROM tasks t
+       LEFT JOIN goal_task_links l ON l.task_id = t.id
+       LEFT JOIN goals g ON g.id = l.goal_id AND g.status = 'Active'
+      WHERE t.status = 'Pending'
+      GROUP BY t.id
+      ORDER BY CASE
+        WHEN t.due_date IS NOT NULL AND t.due_date < ?1 THEN 0
+        WHEN t.due_date = ?1 THEN 1
+        WHEN t.priority = 'High' OR COUNT(DISTINCT g.id) > 0
+             OR t.postponement_count >= 3 THEN 2
+        ELSE 3
+      END, t.due_date IS NULL, t.due_date,
+      CASE t.priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
+      t.id
+      LIMIT ?2`
+  ).bind(today, limit).all();
+  return result.results;
+}
+
+export async function listOverdueTaskMirrors(db, today, limit = 20, reminderCutoff = null) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(today))) {
+    throw new TypeError("Today must be a YYYY-MM-DD date key.");
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new RangeError("Overdue task limit is invalid.");
+  }
+  const result = await db.prepare(
+    `SELECT id, google_task_id, title, priority, due_date, postponement_count
+       FROM tasks
+      WHERE status = 'Pending' AND due_date IS NOT NULL AND due_date < ?1
+        AND (?2 IS NULL OR last_reminder_at IS NULL OR last_reminder_at <= ?2)
+      ORDER BY CASE priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
+               due_date, id
+      LIMIT ?3`
+  ).bind(today, reminderCutoff, limit).all();
   return result.results;
 }
 

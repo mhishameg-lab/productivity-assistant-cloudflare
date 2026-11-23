@@ -9,14 +9,29 @@ database_name = "productivity-assistant-staging"
 database_id = "8a63723d-72ac-4133-ba1a-f1ae16465154"
 migrations_dir = "migrations"
 
+[ai]
+binding = "AI"
+
 [vars]
 DEPLOYMENT_STAGE = "staging"
 ASSISTANT_ENABLED = "false"
 SCHEDULED_JOBS_ENABLED = "false"
+AI_ENABLED = "false"
+AI_FREE_PLAN_CONFIRMED = "false"
+AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_DAILY_NEURON_LIMIT = "5000"
 GOOGLE_CALENDAR_ENABLED = "false"
 GOOGLE_CALENDAR_WRITES_ENABLED = "false"
 GOOGLE_GMAIL_ENABLED = "false"
+GOOGLE_GMAIL_READ_ENABLED = "false"
+GMAIL_AI_ANALYSIS_ENABLED = "false"
 EMAIL_ESCALATIONS_ENABLED = "false"
+TASK_REMINDERS_ENABLED = "false"
+CALENDAR_REMINDERS_ENABLED = "false"
+PUBLIC_BASE_URL = ""
+MINI_APP_ENABLED = "false"
+WORK_PULSES_ENABLED = "false"
+HTML_EMAILS_ENABLED = "false"
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -31,16 +46,31 @@ database_name = "productivity-assistant-production"
 database_id = "a5b51e55-88d7-4aee-b432-163c27655e9c"
 migrations_dir = "migrations"
 
+[env.production.ai]
+binding = "AI"
+
 [env.production.vars]
 DEPLOYMENT_STAGE = "production"
 ASSISTANT_ENABLED = "true"
 SCHEDULED_JOBS_ENABLED = "true"
 TELEGRAM_WEBHOOK_CUTOVER_ENABLED = "false"
 TELEGRAM_WEBHOOK_URL = "https://productivity-assistant-production.mhisham-eg.workers.dev/webhooks/telegram"
-GOOGLE_CALENDAR_ENABLED = "false"
-GOOGLE_CALENDAR_WRITES_ENABLED = "false"
+GOOGLE_CALENDAR_ENABLED = "true"
+GOOGLE_CALENDAR_WRITES_ENABLED = "true"
 GOOGLE_GMAIL_ENABLED = "true"
-EMAIL_ESCALATIONS_ENABLED = "false"
+GOOGLE_GMAIL_READ_ENABLED = "true"
+GMAIL_AI_ANALYSIS_ENABLED = "true"
+EMAIL_ESCALATIONS_ENABLED = "true"
+TASK_REMINDERS_ENABLED = "true"
+CALENDAR_REMINDERS_ENABLED = "true"
+PUBLIC_BASE_URL = "https://productivity-assistant-production.mhisham-eg.workers.dev"
+MINI_APP_ENABLED = "false"
+WORK_PULSES_ENABLED = "false"
+HTML_EMAILS_ENABLED = "false"
+AI_ENABLED = "true"
+AI_FREE_PLAN_CONFIRMED = "true"
+AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+AI_DAILY_NEURON_LIMIT = "5000"
 
 [env.production.triggers]
 crons = ["*/5 * * * *"]

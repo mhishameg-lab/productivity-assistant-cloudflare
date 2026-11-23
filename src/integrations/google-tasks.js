@@ -31,7 +31,9 @@ export function createGoogleTasksClient(env, fetchImpl = fetch, clock = () => Da
       if (attempt < 2) await delay(250 * (2 ** attempt));
     }
     if (!response.ok) {
-      throw new Error(`Google Tasks API request failed with HTTP ${response.status}.`);
+      const error = new Error(`Google Tasks API request failed with HTTP ${response.status}.`);
+      error.status = response.status;
+      throw error;
     }
     if (response.status === 204) return null;
     return response.json();

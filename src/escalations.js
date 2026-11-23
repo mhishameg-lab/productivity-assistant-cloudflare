@@ -1,6 +1,8 @@
 import { logSystemEvent, logSyncEvent } from "./db/channel-repository.js";
 import { syncGoogleTaskMirrors } from "./db/google-tasks-repository.js";
 import { cairoDateStart } from "./integrations/google-calendar.js";
+import { escapeEmailHtml } from "./core/email.js";
+import { cairoTimeParts, shortDate } from "./core/format.js";
 
 const MAX_ESCALATIONS_PER_RUN = 5;
 const DEFAULT_ESCALATION_HOURS = 24;
@@ -10,6 +12,7 @@ export async function processHighPriorityEscalations({
   googleTasks,
   gmail,
   recipient,
+  htmlEmailsEnabled = false,
   now,
   enabled = false
 }) {
@@ -20,8 +23,21 @@ export async function processHighPriorityEscalations({
   if (local.minute !== "00" || hour % 2 !== 0) {
     return { sent: 0, skipped: 0, failed: 0 };
   }
-  if (!googleTasks || !gmail || !recipient) {
-    throw new Error("Google Tasks, Gmail, and the configured email recipient are required for escalations.");
+  const missingConfiguration = [
+    !googleTasks ? "Google Tasks" : null,
+    !gmail ? "Gmail" : null,
+    !recipient ? "PRODUCTIVITY_EMAIL_RECIPIENT" : null
+  ].filter(Boolean);
+  if (missingConfiguration.length) {
+    await logSystemEvent(db, {
+      occurredAt: now.toISOString(),
+      severity: "ERROR",
+      component: "Email escalation",
+      eventType: "Escalation not configured",
+      description: "Skipped email escalations because required integration configuration is missing.",
+      errorMessage: `Missing: ${missingConfiguration.join(", ")}`
+    });
+    return { sent: 0, skipped: 0, failed: 1 };
   }
 
   const date = `${local.year}-${local.month}-${local.day}`;
@@ -108,7 +124,7 @@ export async function processHighPriorityEscalations({
         "SELECT COUNT(*) AS count FROM email_escalations WHERE task_id = ?1"
       ).bind(task.id).first();
       const hoursOverdue = Math.floor(overdueMs / (60 * 60 * 1000));
-      const subject = `Productivity follow-up: ${task.title}`;
+      const subject = `Needs your attention: ${task.title}`;
       const body = [
         `Task: ${task.title}`,
         `Original due date: ${originalDue ? originalDue.new_due_date : task.due_date}`,
@@ -130,7 +146,12 @@ export async function processHighPriorityEscalations({
       });
       let sendError = null;
       try {
-        await gmail.sendText({ to: recipient, subject, body });
+        if (htmlEmailsEnabled) {
+          const html = `<table role="presentation" width="600" style="max-width:600px;width:100%;margin:auto;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif"><tr><td style="padding:24px"><h1>Needs your attention</h1><p>This task is overdue: <strong>${escapeEmailHtml(task.title)}</strong>.</p><p>It was due ${escapeEmailHtml(shortDate(task.due_date))} and is ${hoursOverdue} hours overdue.</p><p>Priority: ${escapeEmailHtml(task.priority)}.</p><p>Review it and choose a clear next step: complete it, reschedule it, or leave it open. No task status is being changed.</p></td></tr></table>`;
+          await gmail.sendMultipart({ to: recipient, subject, text: body, html });
+        } else {
+          await gmail.sendText({ to: recipient, subject, body });
+        }
       } catch (error) {
         sendError = error;
       }
@@ -206,7 +227,7 @@ export async function processHighPriorityEscalations({
       relatedRecordId: jobId,
       errorMessage: error && error.message ? String(error.message).slice(0, 500) : "Unknown error"
     });
-    throw error;
+    return { sent: 0, skipped: 0, failed: 1 };
   }
 }
 
@@ -238,17 +259,5 @@ async function startEscalationAttempt(db, {
 }
 
 function cairoParts(date) {
-  return Object.fromEntries(
-    new Intl.DateTimeFormat("en-GB", {
-      timeZone: "Africa/Cairo",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      hourCycle: "h23"
-    }).formatToParts(date)
-      .filter(part => part.type !== "literal")
-      .map(part => [part.type, part.value])
-  );
+  return cairoTimeParts(date);
 }

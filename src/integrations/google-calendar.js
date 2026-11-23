@@ -1,13 +1,18 @@
 import { createGoogleAccessTokenProvider } from "./google-oauth.js";
+import { cairoDateKey as formattedCairoDateKey, cairoTimeParts, dateTimeLabel, timeLabel } from "../core/format.js";
 
 const GOOGLE_CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 const CAIRO_TIME_ZONE = "Africa/Cairo";
-const cairoDateFormatter = new Intl.DateTimeFormat("en-CA", {
-  timeZone: CAIRO_TIME_ZONE,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit"
-});
+const SAFE_CALENDAR_ERROR_REASONS = new Set([
+  "accessNotConfigured",
+  "calendarUsageLimitsExceeded",
+  "forbidden",
+  "insufficientPermissions",
+  "notFound",
+  "quotaExceeded",
+  "rateLimitExceeded",
+  "userRateLimitExceeded"
+]);
 
 export function cairoDateStart(dateKey) {
   if (!isValidDateKey(dateKey)) {
@@ -35,10 +40,29 @@ export function createGoogleCalendarClient(env, fetchImpl = fetch, clock = () =>
       if (attempt < 2) await delay(250 * (2 ** attempt));
     }
     if (!response.ok) {
+      let googleApiReason = null;
+      try {
+        const errorBody = await response.json();
+        const reasons = [
+          ...(errorBody && errorBody.error && Array.isArray(errorBody.error.errors)
+            ? errorBody.error.errors.map(item => item && item.reason)
+            : []),
+          errorBody && errorBody.error && errorBody.error.status,
+          errorBody && errorBody.error && errorBody.error.reason
+        ];
+        googleApiReason = reasons.find(reason =>
+          typeof reason === "string" && SAFE_CALENDAR_ERROR_REASONS.has(reason)
+        ) || null;
+      } catch {
+        googleApiReason = null;
+      }
+      const suffix = googleApiReason ? ` (${googleApiReason})` : "";
       const error = new Error(
-        `Google Calendar API request failed with HTTP ${response.status}.`
+        `Google Calendar API request failed with HTTP ${response.status}${suffix}.`
       );
       error.status = response.status;
+      error.integration = "Google Calendar";
+      if (googleApiReason) error.googleApiReason = googleApiReason;
       throw error;
     }
     if (response.status === 204) return null;
@@ -218,15 +242,10 @@ function cairoMidnight(dateKey) {
 }
 
 function formatCairoDateKey(date) {
-  const parts = Object.fromEntries(
-    cairoDateFormatter.formatToParts(date)
-      .filter(part => part.type !== "literal")
-      .map(part => [part.type, part.value])
-  );
-  return `${parts.year}-${parts.month}-${parts.day}`;
+  return formattedCairoDateKey(date);
 }
 
-function cairoLocalDateTimeToIso(dateKey, time) {
+export function cairoLocalDateTimeToIso(dateKey, time) {
   if (!isValidDateKey(dateKey) || !/^\d{2}:\d{2}$/.test(String(time))) {
     throw new TypeError("Calendar start must use a real YYYY-MM-DD date and HH:mm Cairo time.");
   }
@@ -259,21 +278,15 @@ function cairoOffsetMinutes(timestamp) {
 }
 
 function cairoDateTimeParts(timestamp) {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-GB", {
-      timeZone: CAIRO_TIME_ZONE,
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hourCycle: "h23"
-    }).formatToParts(new Date(timestamp))
-      .filter(part => part.type !== "literal")
-      .map(part => [part.type, Number(part.value)])
-  );
-  return parts;
+  const values = cairoTimeParts(new Date(timestamp));
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour),
+    minute: Number(values.minute),
+    second: 0
+  };
 }
 
 function formatCairoDateTime(timestamp) {
@@ -282,12 +295,7 @@ function formatCairoDateTime(timestamp) {
 }
 
 function formatCairoTime(value) {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: CAIRO_TIME_ZONE,
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23"
-  }).format(new Date(value));
+  return timeLabel(new Date(value));
 }
 
 function delay(milliseconds) {
