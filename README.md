@@ -3,7 +3,8 @@
 This directory contains the Cloudflare migration implementation for moving the
 assistant from Apps Script and Sheets to Workers and D1. Production
 infrastructure is provisioned, the production Worker is enabled, and Telegram's
-webhook points to the Worker. Keep Apps Script available as a rollback target.
+webhook points to the Worker. The Apps Script project has been deleted, so that
+deployment is no longer available for rollback.
 
 ## Current state
 
@@ -73,8 +74,8 @@ webhook points to the Worker. Keep Apps Script available as a rollback target.
   user to check Google Tasks before retrying uncertain actions.
 
 The Telegram webhook is configured to deliver updates to the production Worker.
-The Apps Script deployment remains available for rollback; do not re-enable its
-webhook relay unless rolling back.
+The former Apps Script deployment has been deleted and cannot be used for
+rollback. The original Google Sheet was not deleted.
 
 ## Local checks
 
@@ -108,9 +109,10 @@ route reports production traffic enabled. The one-time Worker cutover called
 Telegram `setWebhook` using the configured bot token and secret, then verified
 the URL with `getWebhookInfo`. The one-time flag is disabled after success.
 Required secret names are configured in Cloudflare, but secret values are not
-inspected by this repository. No Google Sheet data was imported. Apps Script
-remains available as a rollback target. Account-level free-tier usage has not
-been independently inspected.
+inspected by this repository. No Google Sheet data was imported. The Google
+Sheet remains unchanged as an archive; the deleted Apps Script deployment is
+not available for rollback. Account-level free-tier usage has not been
+independently inspected.
 
 ## Migration gates still open
 
@@ -121,8 +123,8 @@ been independently inspected.
    Calendar read/write, and Gmail send scopes through real production actions.
    The integration gates are enabled, but OAuth permissions have not been
    independently introspected here.
-3. Keep Apps Script available for rollback. Telegram's webhook is configured
-   for `https://productivity-assistant-production.mhisham-eg.workers.dev/webhooks/telegram`.
+3. Telegram's webhook is configured for
+   `https://productivity-assistant-production.mhisham-eg.workers.dev/webhooks/telegram`.
 
 ## D1 setup
 
@@ -148,9 +150,9 @@ until the application is validated against this staging database.
 
 Do not paste OAuth refresh tokens or bot credentials into chat or source files.
 Configure them directly as Cloudflare Worker secrets. Set the verified
-`PRODUCTIVITY_EMAIL_RECIPIENT` privately as a Worker secret/variable only when
-Gmail delivery is ready. `GOOGLE_TASK_LIST_ID` remains the configured dedicated
-Google Task list ID; the Apps Script deployment remains available for rollback.
+`PRODUCTIVITY_EMAIL_RECIPIENT` privately as a Worker secret/variable when Gmail
+delivery is ready. `GOOGLE_TASK_LIST_ID` remains the configured dedicated Google
+Task list ID. The former Apps Script project has been deleted.
 
 ## Free-plan scheduling constraints
 
