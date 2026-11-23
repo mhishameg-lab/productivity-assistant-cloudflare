@@ -1,0 +1,46 @@
+name = "productivity-assistant-migration"
+main = "src/index.js"
+compatibility_date = "2026-11-22"
+workers_dev = false
+
+[[d1_databases]]
+binding = "DB"
+database_name = "productivity-assistant-staging"
+database_id = "8a63723d-72ac-4133-ba1a-f1ae16465154"
+migrations_dir = "migrations"
+
+[vars]
+DEPLOYMENT_STAGE = "staging"
+ASSISTANT_ENABLED = "false"
+SCHEDULED_JOBS_ENABLED = "false"
+GOOGLE_CALENDAR_ENABLED = "false"
+GOOGLE_CALENDAR_WRITES_ENABLED = "false"
+GOOGLE_GMAIL_ENABLED = "false"
+EMAIL_ESCALATIONS_ENABLED = "false"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[env.production]
+name = "productivity-assistant-production"
+workers_dev = true
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "productivity-assistant-production"
+database_id = "a5b51e55-88d7-4aee-b432-163c27655e9c"
+migrations_dir = "migrations"
+
+[env.production.vars]
+DEPLOYMENT_STAGE = "production"
+ASSISTANT_ENABLED = "true"
+SCHEDULED_JOBS_ENABLED = "false"
+TELEGRAM_WEBHOOK_CUTOVER_ENABLED = "false"
+TELEGRAM_WEBHOOK_URL = "https://productivity-assistant-production.mhisham-eg.workers.dev/webhooks/telegram"
+GOOGLE_CALENDAR_ENABLED = "false"
+GOOGLE_CALENDAR_WRITES_ENABLED = "false"
+GOOGLE_GMAIL_ENABLED = "false"
+EMAIL_ESCALATIONS_ENABLED = "false"
+
+[env.production.triggers]
+crons = ["*/5 * * * *"]
