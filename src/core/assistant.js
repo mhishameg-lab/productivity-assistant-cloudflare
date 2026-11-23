@@ -1737,7 +1737,6 @@ async function createOutcomeAndBeginSprint({ db, user, state, text, googleTasks,
       dueDate: date,
       doneTest: `Complete the stated outcome: ${text}`,
       type: "outcome_define",
-      date,
       requestId: state.requestId
     },
     addToTop3: true,
