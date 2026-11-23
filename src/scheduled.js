@@ -216,12 +216,24 @@ async function performTelegramWebhookCutover(env, now) {
           SET completed_at = ?1, status = 'Completed'
         WHERE id = ?2 AND status = 'Processing'`
     ).bind(nowIso, jobId).run();
+    const deliveryStatus = {
+      pendingUpdateCount: Number(info.pending_update_count || 0),
+      lastErrorDate: Number.isFinite(Number(info.last_error_date))
+        ? new Date(Number(info.last_error_date) * 1000).toISOString()
+        : null,
+      lastErrorMessage: info.last_error_message
+        ? String(info.last_error_message).slice(0, 500)
+        : null
+    };
     await logSystemEvent(env.DB, {
       occurredAt: nowIso,
-      severity: "INFO",
+      severity: deliveryStatus.lastErrorMessage ? "WARNING" : "INFO",
       component: "Telegram webhook cutover",
       eventType: "Webhook configured",
-      description: "Telegram webhook now points to the production Worker."
+      description: JSON.stringify({
+        message: "Telegram webhook now points to the production Worker.",
+        ...deliveryStatus
+      })
     });
     return { completed: true };
   } catch (error) {

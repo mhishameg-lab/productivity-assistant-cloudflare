@@ -52,13 +52,16 @@ deployment is no longer available for rollback.
   Guided `/weekly` reflection saves the five playbook questions in D1;
   `/monthly` records a project decision, reason, and future review date without
   calling Trello. Scheduled numerical weekly/monthly snapshots and Gmail report
-  delivery are implemented. Production scheduled messages, Calendar access, and
-  Gmail reports are enabled; email escalations remain separately disabled.
+  delivery are implemented. Production scheduled messages and Gmail reports
+  are enabled. Calendar is temporarily disabled because the configured Google
+  OAuth token receives HTTP 403 from the Calendar API; email escalations remain
+  separately disabled.
 - `wrangler.toml` binds staging and production to separate D1 databases.
   Production is deployed at
   `https://productivity-assistant-production.mhisham-eg.workers.dev`, with
-  `ASSISTANT_ENABLED = "true"`. Scheduled prompts, Calendar reads and
-  user-requested Calendar blocks, and Gmail reports are enabled.
+  `ASSISTANT_ENABLED = "true"`. Scheduled prompts and Gmail reports are
+  enabled. Calendar is disabled until Google OAuth Calendar scopes/access are
+  corrected.
 - When `SCHEDULED_JOBS_ENABLED` is true in staging or production, the single
   Cron handler sends the 07:30 briefing, 14:15 work briefing, 23:00
   shutdown, 23:20 five-question planning prompt, and 00:00/00:20/00:45
@@ -119,10 +122,9 @@ independently inspected.
 1. Verify the Cloudflare account's current free-tier usage;
    account-level usage has not been inspected, so cost compliance is not yet
    certified.
-2. Verify the configured Google OAuth credentials grant the enabled Tasks,
-   Calendar read/write, and Gmail send scopes through real production actions.
-   The integration gates are enabled, but OAuth permissions have not been
-   independently introspected here.
+2. Resolve and verify Google OAuth scopes/access for Calendar. The production
+   Calendar API currently returns HTTP 403, so Calendar reads and writes are
+   disabled. Re-enable only after Calendar access has been validated.
 3. Telegram's webhook is configured for
    `https://productivity-assistant-production.mhisham-eg.workers.dev/webhooks/telegram`.
 
@@ -181,8 +183,9 @@ repository. Configure secrets separately for the production Worker:
 - Worker secrets `TELEGRAM_WEBHOOK_SECRET` and `TELEGRAM_BOT_TOKEN`.
 - `AUTHORIZED_TELEGRAM_USER_ID` and `GOOGLE_TASK_LIST_ID`.
 - Production `GOOGLE_CALENDAR_ENABLED` and
-  `GOOGLE_CALENDAR_WRITES_ENABLED` are `"true"`. Calendar events are created
-  only after an explicit user action; no automatic event creation is enabled.
+  `GOOGLE_CALENDAR_WRITES_ENABLED` are `"false"` pending correction of the
+  Calendar OAuth access (currently HTTP 403). When re-enabled, Calendar blocks
+  remain user-triggered; no automatic event creation is enabled.
   `GOOGLE_CALENDAR_ID` is optional; the client defaults to `primary`.
 - Production `GOOGLE_GMAIL_ENABLED` is `"true"` for scheduled review reports.
   `EMAIL_ESCALATIONS_ENABLED` remains `"false"` until the recipient and
