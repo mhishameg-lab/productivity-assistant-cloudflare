@@ -62,6 +62,7 @@ import {
   parseTimeInput,
   shortDate,
   dateTimeLabel,
+  greetingLine,
   timeLabel
 } from "./format.js";
 import { getDisplayName, say } from "./voice.js";
@@ -164,9 +165,30 @@ export async function handleAssistantMessage({
   }
 
   switch (intent.name) {
+    case "hq":
+      return showCalmHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
     case "start":
     case "today":
       return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
+    case "go":
+    case "next":
+    case "focus":
+      return beginFocusNow({ db, user, now });
+    case "drop":
+      return beginTaskCapture(db, user, now);
+    case "wya":
+      return showWhereIAm({ db, user, now });
+    case "stack":
+      return showTaskStack({ db, googleTasks, now });
+    case "tasks":
+      return showTasks({ db, googleTasks, now });
+    case "late":
+      return showOverdueTasks({ db, googleTasks, now });
+    case "mail":
+    case "inbox":
+      return showInboxTriage({ db, googleGmail, emailFollowUpAnalyzer, now });
+    case "pipeline":
+      return showPipelineOverview();
     case "help":
       return {
         category: "Control panel",
@@ -275,6 +297,52 @@ async function handleAction({
   now
 }) {
   const identifier = intent.identifier;
+  if (identifier === "home_more") {
+    return showFullPlan({ db, user, googleTasks, googleCalendar, now });
+  }
+  if (identifier === "home_back") {
+    return showCalmHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner: null, now });
+  }
+  if (identifier === "wya") {
+    return showWhereIAm({ db, user, now });
+  }
+  if (identifier === "pipeline_rhythm") {
+    return {
+      category: "Daily rhythm",
+      title: "",
+      sections: [{ heading: "", lines: [
+        "Morning at your wake time or 8:00 AM.",
+        "Check-ins every 30 minutes outside the shift.",
+        "Every 60 minutes during 3:00 PM–11:00 PM.",
+        "Work prompt at 2:15 PM on workdays.",
+        "Mid-shift check-in at 7:00 PM.",
+        "Night wrap at 11:15 PM.",
+        "Reminders at the times you set.",
+        "Calendar heads-up 15 minutes before events.",
+        "Friday 6:00 PM weekly email.",
+        "First of month 6:00 PM monthly email.",
+        "Sunday 10:00 AM system status."
+      ] }],
+      actions: [[{ label: "⬅ Back", action: "pipeline_overview" }]]
+    };
+  }
+  if (identifier === "pipeline_rules") {
+    return {
+      category: "My rules",
+      title: "",
+      sections: [{ heading: "", lines: [
+        "I never finish or cancel a task for you.",
+        "You tap Done.",
+        "I only add a calendar block when you tell me to.",
+        "I never send email except scheduled reports.",
+        "I never change your mail.",
+        "If Google doesn't answer, I tell you.",
+        "Dive or sleep means I go quiet."
+      ] }],
+      actions: [[{ label: "⬅ Back", action: "pipeline_overview" }]]
+    };
+  }
+  if (identifier === "pipeline_overview") return showPipelineOverview();
   if (identifier === "home") {
     return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
   }
@@ -2616,6 +2684,176 @@ function formatMinuteOfDay(value) {
   return `${hour}:${minute}`;
 }
 
+export async function showCalmHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now }) {
+  const date = cairoDateKey(now);
+  if (googleTasks) await syncTaskList({ db, googleTasks, now });
+  const name = await getDisplayName(db);
+  const greeting = greetingLine(name, now);
+  const dateLabel = shortDate(date);
+  const active = await db.prepare(
+    `SELECT id, next_action, due_at
+       FROM focus_sessions
+      WHERE user_id = ?1 AND followup_status = 'Scheduled'
+        AND due_at > ?2
+      ORDER BY due_at DESC LIMIT 1`
+  ).bind(user.id, now.toISOString()).first();
+  const nowLine = active
+    ? `⏳ Now · ${active.next_action || "Focus block"} · ends ${timeLabel(active.due_at)}`
+    : "⏳ Now · Nothing running. Ready for the next one?";
+  const pending = await listPendingTaskPlanningCandidates(db, date);
+  const nextTask = pending.find(task => task.status === "Pending");
+  const nextLine = nextTask ? `⏭ Next · ${nextTask.title}` : "⏭ Next · Nothing pending";
+  const why = nextTask
+    ? `<i>Why: ${nextTask.due_date <= date ? "due today" : nextTask.priority === "High" ? "High priority" : "linked to a goal"}</i>`
+    : "<i>Why: your list is clear</i>";
+  const outcomes = await db.prepare(
+    `SELECT area, status FROM daily_outcomes
+      WHERE outcome_date = ?1
+      ORDER BY updated_at DESC, rowid DESC`
+  ).bind(date).all();
+  const completed = new Set(outcomes.results.filter(row => row.status === "Completed").map(row => row.area)).size;
+  const progress = `${"▰".repeat(completed)}${"▱".repeat(Math.max(0, 3 - completed))} ${completed} of 3 outcomes done`;
+  const dueToday = pending.filter(task => task.due_date === date).length;
+  const sections = [
+    { heading: "", lines: [`${greeting} · ${dateLabel}`, nowLine, nextLine, why, progress] }
+  ];
+  if (dueToday >= 4) sections.push({ heading: "", lines: [`Heads-up: ${dueToday} tasks are due today. That's a lot. Pick the 1–3 that matter most.`] });
+  return {
+    category: "HQ",
+    title: "",
+    sections,
+    actions: [[
+      { label: "▶️ Go", action: nextTask ? `start_task|${nextTask.id}` : "focus_now" },
+      { label: "🧭 Where I'm at", action: "wya" },
+      { label: "More", action: "home_more" }
+    ]]
+  };
+}
+
+export async function showFullPlan({ db, user, googleTasks, googleCalendar, now }) {
+  const date = cairoDateKey(now);
+  if (googleTasks) await syncTaskList({ db, googleTasks, now });
+  const pending = await listPendingTaskPlanningCandidates(db, date);
+  const overdue = pending.filter(task => task.due_date && task.due_date < date).slice(0, 3);
+  const dueToday = pending.filter(task => task.due_date === date).slice(0, 3);
+  const sections = [];
+  if (overdue.length) sections.push({
+    heading: "🔴 Overdue",
+    lines: overdue.map(task => `🔴 ${task.title}${task.priority === "High" ? " 🔥" : task.priority === "Low" ? " 🧊" : ""}`)
+  });
+  if (dueToday.length) sections.push({
+    heading: "🟡 Due today",
+    lines: dueToday.map(task => `🟡 ${task.title}${task.priority === "High" ? " 🔥" : task.priority === "Low" ? " 🧊" : ""}`)
+  });
+  if (googleCalendar) {
+    try {
+      const events = await googleCalendar.listEventsForDate(date);
+      const upcoming = events.filter(event => !event.allDay).slice(0, 3);
+      if (upcoming.length) sections.push({
+        heading: "📅 Calendar",
+        lines: upcoming.map(event => `📅 ${event.start} – ${event.end} · ${event.title}`)
+      });
+    } catch {}
+  }
+  const goals = await listGoals(db, user.id);
+  if (goals.length) sections.push({
+    heading: "🎯 Goals",
+    lines: goals.slice(0, 3).map(goal => `${goal.title}`)
+  });
+  return {
+    category: "Full plan",
+    title: "",
+    sections: sections.length ? sections : [{ heading: "", lines: ["You're clear for today."] }],
+    actions: [[{ label: "⬅ Back", action: "home_back" }]]
+  };
+}
+
+export async function showWhereIAm({ db, user, now }) {
+  const date = cairoDateKey(now);
+  const session = await db.prepare(
+    `SELECT next_action, started_at
+       FROM focus_sessions
+      WHERE user_id = ?1
+      ORDER BY started_at DESC LIMIT 1`
+  ).bind(user.id).first();
+  const completed = await db.prepare(
+    `SELECT outcome FROM daily_outcomes
+      WHERE outcome_date = ?1 AND status = 'Completed'
+      ORDER BY updated_at DESC LIMIT 3`
+  ).bind(date).all();
+  const active = await db.prepare(
+    `SELECT outcome, area FROM daily_outcomes
+      WHERE outcome_date = ?1 AND status NOT IN ('Completed','Dropped')
+      ORDER BY updated_at DESC LIMIT 1`
+  ).bind(date).first();
+  const lines = [];
+  if (session) lines.push(`Doing: ${session.next_action || "Focus session"} since ${timeLabel(session.started_at)}`);
+  else lines.push("Doing: nothing running");
+  if (completed.results.length) {
+    lines.push(...completed.results.map(row => `✅ ${row.outcome}`));
+  }
+  if (active) lines.push(`Next: ${active.outcome}`);
+  else lines.push("Next: nothing pending");
+  return {
+    category: "Where I'm at",
+    title: "",
+    sections: [{ heading: "", lines }],
+    actions: [[{ label: "▶️ Go", action: "focus_now" }]]
+  };
+}
+
+export function formatTaskStack(tasks) {
+  return tasks.slice(0, 8).map(task => {
+    const status = task.status === "Completed" ? "✅" : task.due_date && task.due_date < "9999-99-99" ? "🟢" : "⚪";
+    const priority = task.priority === "High" ? " 🔥" : task.priority === "Low" ? " 🧊" : "";
+    const due = task.due_date ? ` · due ${shortDate(task.due_date)}` : "";
+    return `${status} ${task.title}${priority}${due}`;
+  });
+}
+
+export async function showTaskStack({ db, googleTasks, now }) {
+  if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+  await syncTaskList({ db, googleTasks, now });
+  const tasks = await listPendingTaskMirrors(db, cairoDateKey(now), 8, 0);
+  const completionRows = tasks.slice(0, 3).map(task => ({
+    label: `✅ Done · ${task.title.slice(0, 22)}`,
+    action: `task_complete|${task.id}`
+  }));
+  const actions = completionRows.length
+    ? [completionRows, [{ label: "More", action: "show_tasks" }]]
+    : [[{ label: "More", action: "show_tasks" }]];
+  return {
+    category: "Task stack",
+    title: "",
+    sections: [{ heading: "", lines: formatTaskStack(tasks) }],
+    actions
+  };
+}
+
+export function showPipelineOverview() {
+  return {
+    category: "Pipeline",
+    title: "",
+    sections: [{
+      heading: "",
+      lines: [
+        "I'm your private helper in Telegram.",
+        "I keep your day clear, check on you, and remember things for you.",
+        "Tasks live in Google Tasks; I keep a copy.",
+        "Reminders, plans, notes and reviews live in my database.",
+        "Calendar is read from Google Calendar.",
+        "Unread mail is read, never changed.",
+        "Plan the day → do one thing at a time → I check on you → we wrap up at night."
+      ]
+    }],
+    actions: [[
+      { label: "🕒 Daily rhythm", action: "pipeline_rhythm" },
+      { label: "🛡 My rules", action: "pipeline_rules" },
+      { label: "⚙️ Settings now", action: "pipeline_settings" }
+    ]]
+  };
+}
+
 async function showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now }) {
   const date = cairoDateKey(now);
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
@@ -3502,7 +3740,11 @@ function response(category, text) {
     title: "",
     sections: [{ heading: "", lines: [text] }],
     actions: [],
-    replyKeyboard: ["▶ Next", "🗓 Plan", "➕ Add", "📋 Today"]
+    replyKeyboardRows: [
+      ["▶️ Go", "📝 Drop it"],
+      ["🧭 Where I'm at", "🗓 Plan"],
+      ["😴 Zzz", "📱 HQ"]
+    ]
   };
 }
 

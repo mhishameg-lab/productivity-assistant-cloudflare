@@ -64,6 +64,7 @@ import {
 import { say, selectToneTier } from "../src/core/voice.js";
 import { VOICE_BANK } from "../src/core/voice-bank.js";
 import { validateTelegramInitData, timingSafeEqual } from "../src/core/miniapp.js";
+import { formatTaskStack } from "../src/core/assistant.js";
 
 class TestD1Database {
   constructor(database) {
@@ -137,6 +138,28 @@ async function createTestDatabase() {
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
+
+test("v4 Stage 3 aliases, task stack, and calm layout", () => {
+  assert.equal(resolveIntent(adaptTelegramUpdate({
+    update_id: 900,
+    message: { message_id: 901, chat: { id: 902 }, from: { id: 903 }, text: "/hq" }
+  })).name, "hq");
+  assert.equal(resolveIntent(adaptTelegramUpdate({
+    update_id: 904,
+    message: { message_id: 905, chat: { id: 902 }, from: { id: 903 }, text: "/late" }
+  })).name, "late");
+  assert.equal(resolveDeterministicTextIntent("where am i"), "wya");
+  const stack = formatTaskStack([
+    { title: "A very important task", status: "Pending", priority: "High", due_date: "2026-11-25" },
+    { title: "Low priority task", status: "Pending", priority: "Low", due_date: null }
+  ]);
+  assert.equal(stack.length, 2);
+  assert.match(stack[0], /^🟢/);
+  assert.match(stack[0], /🔥/);
+  assert.match(stack[0], /due Nov 25, 2026/);
+  assert.match(stack[1], /^⚪/);
+  assert.match(stack[1], /🧊/);
+});
 
 test("v4 Stage 2 voice tiers, safety, companion state, and typography", async () => {
   const now = new Date("2026-11-24T10:00:00.000Z");

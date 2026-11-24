@@ -1,4 +1,19 @@
 const SUPPORTED_COMMANDS = new Set([
+  "hq",
+  "go",
+  "drop",
+  "wya",
+  "plan",
+  "zzz",
+  "dive",
+  "remind",
+  "reminders",
+  "stack",
+  "late",
+  "mail",
+  "pipeline",
+  "next",
+  "recap",
   "start",
   "today",
   "tomorrow",
@@ -26,6 +41,11 @@ const SUPPORTED_COMMANDS = new Set([
 ]);
 
 const DETERMINISTIC_TEXT_ROUTES = [
+  { intent: "hq", patterns: [/^(?:hq|where's my hq|show my hq)$/] },
+  { intent: "go", patterns: [/^(?:go|next move|what's next)$/] },
+  { intent: "wya", patterns: [/^(?:wya|where am i|where'?s my place|lost)$/] },
+  { intent: "stack", patterns: [/^(?:show|list) (?:my )?(?:task )?stack$/] },
+  { intent: "pipeline", patterns: [/^(?:what'?s our pipeline|how do you work|what do you do)$/] },
   { intent: "today", patterns: [/^(?:what should i focus on today|what should i do today|what should i do next|plan my day|show (?:me )?(?:today'?s|my daily) plan)$/] },
   { intent: "tomorrow", patterns: [/^(?:prepare me for tomorrow|plan tomorrow|show (?:me )?tomorrow'?s plan)$/] },
   { intent: "tasks", patterns: [/^(?:show|list|review) (?:me )?(?:my )?(?:open |unfinished |pending )?tasks$/, /^what (?:are )?my unfinished tasks$/] },

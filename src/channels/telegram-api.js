@@ -63,6 +63,9 @@ export function createTelegramApi(token, fetchImpl = fetch) {
     setMyCommands(commands) {
       return this.call("setMyCommands", { commands });
     },
+    setChatMenuButton(payload) {
+      return this.call("setChatMenuButton", payload);
+    },
 
     sendAssistantResponse(chatId, response) {
       const sections = (response.sections || []).map(section => {
@@ -76,7 +79,13 @@ export function createTelegramApi(token, fetchImpl = fetch) {
         response.title ? escapeTelegramHtml(response.title) : "",
         ...sections
       ].filter(Boolean).join("\n\n");
-      const replyMarkup = response.replyKeyboard
+      const replyMarkup = response.replyKeyboardRows
+        ? {
+            keyboard: response.replyKeyboardRows.map(row => row.map(text => ({ text }))),
+            resize_keyboard: true,
+            is_persistent: true
+          }
+        : response.replyKeyboard
         ? {
             keyboard: [response.replyKeyboard.map(text => ({ text }))],
             resize_keyboard: true,

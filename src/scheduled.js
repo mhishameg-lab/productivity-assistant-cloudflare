@@ -263,24 +263,28 @@ async function performTelegramWebhookCutover(env, now) {
       drop_pending_updates: false
     });
     await telegram.setMyCommands([
-      { command: "start", description: "Daily plan" },
-      { command: "today", description: "Today card" },
-      { command: "tomorrow", description: "Tomorrow plan" },
-      { command: "tasks", description: "Open tasks" },
-      { command: "overdue", description: "Overdue tasks" },
-      { command: "inbox", description: "Unread inbox" },
-      { command: "accountability", description: "Trello and Obsidian check-in" },
-      { command: "goals", description: "Review goals" },
-      { command: "goal", description: "Create a goal" },
-      { command: "addtask", description: "Add a task" },
-      { command: "focus", description: "Start a focus block" },
-      { command: "available", description: "Plan available time" },
-      { command: "weekly", description: "Weekly review" },
-      { command: "monthly", description: "Monthly project review" },
-      { command: "quiet", description: "Mute proactive pulses" },
-      { command: "pulses", description: "Today's pulse status" },
-      { command: "help", description: "Assistant help" }
+      { command: "hq", description: "📱 Your HQ: now, next, today" },
+      { command: "go", description: "▶️ Start the next move" },
+      { command: "drop", description: "📝 Drop a task" },
+      { command: "wya", description: "🧭 Where I'm at" },
+      { command: "plan", description: "🗓 Plan your day" },
+      { command: "zzz", description: "😴 Sleep mode and wake-up" },
+      { command: "dive", description: "🎧 Leave me alone for a few hours" },
+      { command: "remind", description: "⏰ Remind me about something" },
+      { command: "stack", description: "📋 Your task stack" },
+      { command: "late", description: "🔴 What's overdue" },
+      { command: "mail", description: "📥 Unread mail" },
+      { command: "pipeline", description: "🔧 How this bot works" }
     ]);
+    if (env.MINI_APP_ENABLED === "true" && env.PUBLIC_BASE_URL) {
+      await telegram.setChatMenuButton({
+        menu_button: {
+          type: "web_app",
+          text: "HQ",
+          web_app: { url: `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/app/home` }
+        }
+      });
+    }
     const info = await telegram.call("getWebhookInfo", {});
     if (info.url !== env.TELEGRAM_WEBHOOK_URL) {
       throw new Error("Telegram did not report the configured production webhook URL.");
