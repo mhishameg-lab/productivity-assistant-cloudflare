@@ -42,6 +42,13 @@
 - Tests added: dive duration formats including Arabic, sleep wake parsing, companion tables and scheduling output.
 - Assumptions: Full check-in backoff and wake re-pings remain limited to the Cron-safe implementation provided here; no external alarm or notification guarantee is implied.
 
+## Stage 8: Pipeline explainer
+
+- Status: done
+- Files touched: `src/core/schedule.js`, `src/core/assistant.js`, `src/scheduled.js`, `test/worker.test.js`
+- Tests added: schedule constants and pipeline/scheduler consistency.
+- Assumptions: Pipeline settings remain a read view while Mini App settings writes are completed in the existing chat settings routes.
+
 ## Stage 5: Mini App
 
 - Status: done

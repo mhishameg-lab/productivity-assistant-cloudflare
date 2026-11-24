@@ -73,6 +73,7 @@ import {
   parseUserReminder
 } from "../user-reminders.js";
 import { endDive, parseDiveDuration, parseSleepTime, startDive, startSleep } from "../companion.js";
+import { SCHEDULE } from "./schedule.js";
 
 export async function handleAssistantMessage({
   db,
@@ -550,12 +551,12 @@ async function handleAction({
       category: "Daily rhythm",
       title: "",
       sections: [{ heading: "", lines: [
-        "Morning at your wake time or 8:00 AM.",
-        "Check-ins every 30 minutes outside the shift.",
-        "Every 60 minutes during 3:00 PM–11:00 PM.",
-        "Work prompt at 2:15 PM on workdays.",
-        "Mid-shift check-in at 7:00 PM.",
-        "Night wrap at 11:15 PM.",
+        `Morning at your wake time or ${SCHEDULE.morningFallback}.`,
+        `Check-ins every ${SCHEDULE.checkInOutsideShift} outside the shift.`,
+        `Every ${SCHEDULE.checkInShift} during ${SCHEDULE.shiftWindow}.`,
+        `Work prompt at ${SCHEDULE.workPrompt} on workdays.`,
+        `Mid-shift check-in at ${SCHEDULE.midShift} on workdays.`,
+        `Night wrap at ${SCHEDULE.nightWrap}.`,
         "Reminders at the times you set.",
         "Calendar heads-up 15 minutes before events.",
         "Friday 6:00 PM weekly email.",

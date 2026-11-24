@@ -51,6 +51,7 @@ import {
 } from "../src/ai/review-analyzer.js";
 import { createGoal, updateGoalKeyResult } from "../src/db/goal-repository.js";
 import { parseDiveDuration, parseSleepTime } from "../src/companion.js";
+import { SCHEDULE, scheduledJobForCairoTime } from "../src/core/schedule.js";
 import {
   areaLabel,
   longDate,
@@ -148,6 +149,16 @@ async function createTestDatabase() {
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
+
+test("v4 Stage 8 pipeline schedule constants match scheduler routes", () => {
+  assert.equal(scheduledJobForCairoTime("08:00"), "morning");
+  assert.equal(scheduledJobForCairoTime("14:15"), "work_briefing");
+  assert.equal(scheduledJobForCairoTime("23:15"), "night_wrap");
+  assert.equal(scheduledJobForCairoTime("12:00"), null);
+  assert.equal(SCHEDULE.nightWrap, "11:15 PM");
+  assert.equal(SCHEDULE.morningFallback, "8:00 AM");
+  assert.equal(SCHEDULE.workPrompt, "2:15 PM");
+});
 
 test("v4 Stage 7 dive and sleep parsers fail safely", () => {
   assert.equal(parseDiveDuration("/dive 2h"), 120);

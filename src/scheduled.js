@@ -23,6 +23,7 @@ import { getDisplayName, say } from "./core/voice.js";
 import { processWorkPulses } from "./pulses.js";
 import { processUserReminders } from "./user-reminders.js";
 import { processCompanion } from "./companion.js";
+import { scheduledJobForCairoTime } from "./core/schedule.js";
 
 const MAX_FOLLOWUPS_PER_RUN = 5;
 const MAX_FOLLOWUP_AGE_MS = 30 * 60 * 1000;
@@ -367,11 +368,7 @@ export async function processScheduledRhythm({
   const parts = cairoDateTimeParts(now);
   const date = `${parts.year}-${parts.month}-${parts.day}`;
   const time = `${parts.hour}:${parts.minute}`;
-  const dueJob = {
-    "08:00": "morning",
-    "14:15": "work_briefing",
-    "23:15": "night_wrap"
-  }[time];
+  const dueJob = scheduledJobForCairoTime(time);
   if (!dueJob) return { sent: 0, skipped: 0 };
   const weekdayName = formatCairoTimeParts(now).weekday;
   const weekday = weekdayName === "Sat" ? 6 : weekdayName === "Sun" ? 0 : null;
