@@ -703,9 +703,10 @@ cloudflare/
 
 ### Environments
 
-`wrangler.toml` defaults to staging: assistant, Cron, AI, Calendar, Gmail,
-reminders, and escalations are disabled. The `production` environment has a
-separate Worker and D1 binding and is enabled after user authorization.
+`wrangler.toml` defaults to production. Staging is isolated in the `staging`
+environment and must be selected explicitly with `--env staging`; its assistant,
+Cron, AI, Calendar, Gmail, reminders, and escalations are disabled. Production
+has its own Worker and D1 binding.
 
 Important production gates:
 
@@ -801,10 +802,10 @@ production email workflows to test them.
 - `/progress`, `/review`, `/capture`, `/habits`, and `/settings` are registered
   command names without migrated workflows.
 - A Git push previously resulted in a staging-configured version reaching the
-  production Worker. After pushing, verify the production deployment's
-  environment and health; the Cloudflare dashboard build configuration must
-  use `wrangler deploy --env production` or automatic deployment should be
-  disabled.
+  production Worker. The base Wrangler configuration now targets production,
+  while staging requires `--env staging`. Configure Cloudflare Builds to run
+  `wrangler deploy --env production` and verify `/health` after pushes; the
+  explicit environment protects against dashboard-level overrides.
 - The original Apps Script deployment is deleted and is not a rollback
   option. The current completion target is Cloudflare Workers + D1.
 
