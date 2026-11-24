@@ -67,13 +67,13 @@ export function createTelegramApi(token, fetchImpl = fetch) {
     sendAssistantResponse(chatId, response) {
       const sections = (response.sections || []).map(section => {
         const heading = section.heading
-          ? `<b>${escapeTelegramHtml(section.heading)}</b>\n`
+          ? `${escapeTelegramHtml(section.heading)}\n`
           : "";
         const lines = (section.lines || []).map(escapeTelegramHtml).join("\n");
         return `${heading}${lines}`;
       }).filter(Boolean);
       const text = [
-        response.title ? `<b>${escapeTelegramHtml(response.title)}</b>` : "",
+        response.title ? escapeTelegramHtml(response.title) : "",
         ...sections
       ].filter(Boolean).join("\n\n");
       const replyMarkup = response.replyKeyboard
@@ -102,13 +102,13 @@ export function createTelegramApi(token, fetchImpl = fetch) {
     editAssistantResponse(chatId, messageId, response) {
       const sections = (response.sections || []).map(section => {
         const heading = section.heading
-          ? `<b>${escapeTelegramHtml(section.heading)}</b>\n`
+          ? `${escapeTelegramHtml(section.heading)}\n`
           : "";
         const lines = (section.lines || []).map(escapeTelegramHtml).join("\n");
         return `${heading}${lines}`;
       }).filter(Boolean);
       const text = [
-        response.title ? `<b>${escapeTelegramHtml(response.title)}</b>` : "",
+        response.title ? escapeTelegramHtml(response.title) : "",
         ...sections
       ].filter(Boolean).join("\n\n");
       const replyMarkup = response.actions && response.actions.length

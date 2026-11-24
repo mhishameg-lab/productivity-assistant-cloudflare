@@ -61,7 +61,8 @@ import {
   durationLabel,
   greetingLine
 } from "../src/core/format.js";
-import { say } from "../src/core/voice.js";
+import { say, selectToneTier } from "../src/core/voice.js";
+import { VOICE_BANK } from "../src/core/voice-bank.js";
 import { validateTelegramInitData, timingSafeEqual } from "../src/core/miniapp.js";
 
 class TestD1Database {
@@ -121,6 +122,7 @@ async function createTestDatabase() {
   const calendarRemindersMigration = await readFile(new URL("../migrations/0007_calendar_reminders.sql", import.meta.url), "utf8");
   const phaseUpgradeMigration = await readFile(new URL("../migrations/0008_phase_upgrade.sql", import.meta.url), "utf8");
   const v4Stage1Migration = await readFile(new URL("../migrations/0009_v4_stage1.sql", import.meta.url), "utf8");
+  const v4Stage2Migration = await readFile(new URL("../migrations/0010_v4_stage2.sql", import.meta.url), "utf8");
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(initialSchema);
   sqlite.exec(focusSessionsMigration);
@@ -131,9 +133,30 @@ async function createTestDatabase() {
   sqlite.exec(calendarRemindersMigration);
   sqlite.exec(phaseUpgradeMigration);
   sqlite.exec(v4Stage1Migration);
+  sqlite.exec(v4Stage2Migration);
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
+
+test("v4 Stage 2 voice tiers, safety, companion state, and typography", async () => {
+  const now = new Date("2026-11-24T10:00:00.000Z");
+  assert.equal(selectToneTier({ consecutiveIgnored: 1, overdueDays: 0, now }), "tier1");
+  assert.equal(selectToneTier({ consecutiveIgnored: 2, overdueDays: 0, now }), "tier2");
+  assert.equal(selectToneTier({ consecutiveIgnored: 4, overdueDays: 0, now }), "tierC");
+  assert.equal(selectToneTier({ consecutiveIgnored: 1, overdueDays: 4, highPriorityOverdue: true, now }), "tier3");
+  assert.equal(selectToneTier({ consecutiveIgnored: 3, now }), "tierC");
+  assert.equal(selectToneTier({ consecutiveIgnored: 5, tone: "gentle", now }), "tierC");
+  assert.equal(selectToneTier({ consecutiveIgnored: 1, now: new Date("2026-11-24T21:30:00.000Z") }), "tier1");
+  assert.equal(selectToneTier({ consecutiveIgnored: 1, sleepActive: true, now }), "tier1");
+  const text = Object.values(VOICE_BANK).flat().join("\n").toLowerCase();
+  for (const banned of ["lazy", "useless", "loser", "failure"]) assert.doesNotMatch(text, new RegExp(banned));
+  assert.equal(say("tier1", { name: "Martino", task: "Call Ahmed", now, counter: 0 }),
+    say("tier1", { name: "Martino", task: "Call Ahmed", now, counter: 0 }));
+
+  const { sqlite, d1 } = await createTestDatabase();
+  assert.equal(sqlite.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='companion_state'").get().name, "companion_state");
+  sqlite.close();
+});
 
 test("v4 Stage 1 seeds Martino and V4 display settings", async () => {
   const { sqlite, d1 } = await createTestDatabase();

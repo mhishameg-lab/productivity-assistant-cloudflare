@@ -252,6 +252,9 @@ export async function handleAssistantMessage({
     }
     case "pulses":
       return showPulseStatus(db, user.id, now);
+    case "vibe":
+    case "tone":
+      return updateToneSetting(db, intent.arguments, now);
     default:
       return response(
         "Migration status",
@@ -3401,6 +3404,21 @@ async function getDefaultFocusDuration(db, userId, area, now) {
   return result && (Number(result.duration_minutes) === 25 || Number(result.duration_minutes) === 50)
     ? Number(result.duration_minutes)
     : 25;
+}
+
+async function updateToneSetting(db, argumentsText, now) {
+  const tone = String(argumentsText || "").trim().toLowerCase();
+  if (!["cheeky", "gentle"].includes(tone)) {
+    return response("Vibe", "Use /vibe cheeky or /vibe gentle.");
+  }
+  await db.prepare(
+    `INSERT INTO settings (setting_key, setting_value, description, category, updated_at)
+     VALUES ('tone', ?1, 'Friendly check-in tone', 'Companion', ?2)
+     ON CONFLICT(setting_key) DO UPDATE SET
+       setting_value = excluded.setting_value,
+       updated_at = excluded.updated_at`
+  ).bind(tone, now.toISOString()).run();
+  return response("Vibe", tone === "gentle" ? "Gentle mode is on." : "Cheeky mode is on.");
 }
 
 async function showPulseStatus(db, userId, now) {

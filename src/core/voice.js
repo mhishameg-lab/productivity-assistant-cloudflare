@@ -1,6 +1,8 @@
 import { cairoDateKey, cairoTimeParts } from "./format.js";
+import { VOICE_BANK } from "./voice-bank.js";
 
 export const VOICE_VARIANTS = {
+  ...VOICE_BANK,
   greeting_morning: [
     "Good morning, {name}. Ready when you are.",
     "Good morning, {name}. Fresh day, clear plan.",
@@ -60,6 +62,33 @@ export function greetingLine(dbName, now = new Date()) {
   if (hour < 18) return `Good afternoon, ${name}.`;
   if (hour < 23) return `Good evening, ${name}.`;
   return `Hey ${name}.`;
+}
+
+export function selectToneTier({
+  consecutiveIgnored = 0,
+  overdueDays = 0,
+  highPriorityOverdue = false,
+  tone = "cheeky",
+  careOverrideUntil = null,
+  diveUntil = null,
+  sleepActive = false,
+  now = new Date(),
+  wakeTimeMinute = null
+}) {
+  if (sleepActive || diveUntil && Date.parse(diveUntil) > now.getTime()) return "tier1";
+  if (careOverrideUntil && Date.parse(careOverrideUntil) > now.getTime()) return "tierC";
+  if (consecutiveIgnored >= 3) return "tierC";
+  const hour = Number(cairoTimeParts(now).hour);
+  const minute = Number(cairoTimeParts(now).minute);
+  const minuteOfDay = hour * 60 + minute;
+  const wakeMinute = Number.isInteger(wakeTimeMinute) ? wakeTimeMinute : 8 * 60;
+  if (minuteOfDay >= 23 * 60 || minuteOfDay < wakeMinute) return "tier1";
+  if (tone === "gentle") return "tier1";
+  if (consecutiveIgnored >= 4 ||
+      highPriorityOverdue && overdueDays >= 3) return "tier3";
+  if (consecutiveIgnored >= 2 ||
+      overdueDays >= 2) return "tier2";
+  return "tier1";
 }
 
 function fillTemplate(template, context) {

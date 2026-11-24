@@ -20,7 +20,9 @@ const SUPPORTED_COMMANDS = new Set([
   "settings",
   "help"
   ,"quiet",
-  "pulses"
+  "pulses",
+  "vibe",
+  "tone"
 ]);
 
 const DETERMINISTIC_TEXT_ROUTES = [
