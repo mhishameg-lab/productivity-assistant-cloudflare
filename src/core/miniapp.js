@@ -30,7 +30,10 @@ export async function validateTelegramInitData(initData, botToken, authorizedUse
   const actual = [...new Uint8Array(signature)].map(byte => byte.toString(16).padStart(2, "0")).join("");
   if (!timingSafeEqual(actual, hash.toLowerCase())) return null;
   const authDate = Number(params.get("auth_date"));
-  if (!Number.isFinite(authDate) || Date.now() / 1000 - authDate > 24 * 60 * 60) return null;
+  const nowSeconds = Date.now() / 1000;
+  if (!Number.isFinite(authDate) ||
+      authDate > nowSeconds + 60 ||
+      nowSeconds - authDate > 24 * 60 * 60) return null;
   let user;
   try {
     user = JSON.parse(params.get("user") || "null");
@@ -51,12 +54,17 @@ export function timingSafeEqual(left, right) {
 }
 
 export function miniAppResponse(html, status = 200) {
-  return new Response(html, {
+  const nonce = crypto.randomUUID().replace(/-/g, "");
+  const htmlWithNonces = String(html).replace(
+    /<script\b(?![^>]*\bnonce=)([^>]*)>/gi,
+    `<script nonce="${nonce}"$1>`
+  );
+  return new Response(htmlWithNonces, {
     status,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:",
+      "Content-Security-Policy": `default-src 'self'; script-src 'self' https://telegram.org 'nonce-${nonce}'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:`,
       "X-Content-Type-Options": "nosniff"
     }
   });
@@ -71,7 +79,7 @@ ${areaCard("DEEP", "🌱 Growth")}${areaCard("WORK", "💼 Work")}${areaCard("LI
 <button id="save" type="submit">Save</button><p id="error" class="error"></p></form></main><script>
 const tg=window.Telegram&&Telegram.WebApp;tg&&tg.ready();tg&&tg.MainButton.setText("Save");
 async function submit(){const d=new FormData(plan);const initData=tg?tg.initData:"";const r=await fetch("/app/api/plan",{method:"POST",headers:{"Content-Type":"application/json","X-Telegram-Init-Data":initData},body:JSON.stringify({requestId:crypto.randomUUID(),mode:new URLSearchParams(location.search).get("mode")||"today",growth:d.get("DEEP"),work:d.get("WORK"),life:d.get("LIFE"),risk:d.get("risk")})});const j=await r.json();if(!r.ok)throw new Error(j.error||"Couldn't save");tg&&tg.HapticFeedback&&tg.HapticFeedback.notificationOccurred("success");tg&&tg.close();}
-plan.onsubmit=e=>{e.prevent();submit().catch(e=>error.textContent=e.message)};
+plan.onsubmit=e=>{e.preventDefault();submit().catch(e=>error.textContent=e.message)};
 tg&&tg.MainButton.onClick(()=>submit().catch(e=>error.textContent=e.message));
 </script></body></html>`;
 }
@@ -83,7 +91,7 @@ export function addTaskPageHtml(name) {
 <label>Priority</label><select name="priority"><option>Medium</option><option>High</option><option>Low</option></select><label>Due</label><select name="due"><option value="">No deadline</option><option value="today">Today</option><option value="tomorrow">Tomorrow</option></select><label>What counts as done?</label><input name="doneTest"><button type="submit">Save</button><p id="error" class="error"></p></form></main><script>
 const tg=window.Telegram&&Telegram.WebApp;tg&&tg.ready();tg&&tg.MainButton.setText("Save");
 async function submit(){const d=new FormData(task);const r=await fetch("/app/api/task",{method:"POST",headers:{"Content-Type":"application/json","X-Telegram-Init-Data":tg?tg.initData:""},body:JSON.stringify({requestId:crypto.randomUUID(),title:d.get("title"),area:d.get("area"),priority:d.get("priority"),due:d.get("due"),doneTest:d.get("doneTest")})});const j=await r.json();if(!r.ok)throw new Error(j.error||"Couldn't save");tg&&tg.HapticFeedback&&tg.HapticFeedback.notificationOccurred("success");tg&&tg.close();}
-task.onsubmit=e=>{e.prevent();submit().catch(e=>error.textContent=e.message)};tg&&tg.MainButton.onClick(()=>submit().catch(e=>error.textContent=e.message));
+task.onsubmit=e=>{e.preventDefault();submit().catch(e=>error.textContent=e.message)};tg&&tg.MainButton.onClick(()=>submit().catch(e=>error.textContent=e.message));
 </script></body></html>`;
 }
 

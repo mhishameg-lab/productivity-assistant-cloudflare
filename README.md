@@ -777,21 +777,34 @@ production email workflows to test them.
 ## 10. Current state and known limitations
 
 - Production Worker and D1 are provisioned; Telegram's webhook points to the
-  Worker. The current health endpoint has reported production traffic enabled.
+  Worker. The current health endpoint reports production traffic enabled. The
+  health endpoint is shallow and does not verify external APIs.
 - The legacy Google Sheet remains unchanged; no Sheet data was imported.
-- Workers AI, Gmail, Calendar, and scheduled features are enabled in production
-  behind the documented gates. Staging remains disabled by default.
+- Workers AI, Gmail, scheduled reports, escalations, and overdue-task
+  reminders are enabled in production behind their configuration. Google
+  Calendar read/write and Calendar reminders are disabled because production
+  logs showed Google API `accessNotConfigured` errors. Re-enable them only
+  after the API and account access are verified.
 - The user verified the Cloudflare free plan and account-level AI usage before
   production activation. The internal D1 ledger cannot account for other AI
   consumers in the Cloudflare account.
-- The Mini App UI is not migrated. The text-based availability and scheduling
-  flows do not depend on it.
+- The Mini App is disabled in production. Its page scaffolds and APIs are not
+  complete enough to enable; Rest and Settings remain placeholders and no full
+  Mini App journey has been end-to-end verified.
+- Companion mode, user reminders, and work pulses are disabled in production.
+  Their commands now explain when delivery is paused instead of promising
+  unscheduled messages.
 - The latest code tests verify escalation failure isolation, but a successful
   production email-escalation cycle has not yet been verified. A previous
   sanitized production scheduler record indicated a Google Tasks-related
   failure. No test email or manually fabricated eligible task has been used.
 - `/progress`, `/review`, `/capture`, `/habits`, and `/settings` are registered
   command names without migrated workflows.
+- A Git push previously resulted in a staging-configured version reaching the
+  production Worker. After pushing, verify the production deployment's
+  environment and health; the Cloudflare dashboard build configuration must
+  use `wrangler deploy --env production` or automatic deployment should be
+  disabled.
 - The original Apps Script deployment is deleted and is not a rollback
   option. The current completion target is Cloudflare Workers + D1.
 
@@ -821,9 +834,10 @@ The Cron expression remains `*/5 * * * *`; scheduled work may arrive up to about
 - `/hq` is the calm home; `/go` starts the next move.
 - `/wya` shows what is running, what finished, and the next step.
 - `/stack` shows the task stack with status emoji and High/Low priority markers.
-- `/remind` stores explicit reminders in D1, separate from Google Tasks and Calendar.
-- `/zzz` starts or confirms sleep mode.
-- `/dive` starts heads-down mode; `/back` ends it early.
+- `/remind` stores explicit reminders in D1 when delivery is enabled. The
+  production reminder gate is currently off, so creation requests are declined.
+- `/zzz`, `/dive`, and `/back` control Companion mode when enabled. The
+  production Companion gate is currently off.
 - `/vibe cheeky|gentle` changes the tone.
 - `/pings 30|60|off` changes Companion frequency.
 - `/pipeline` explains the daily rhythm and bot rules.

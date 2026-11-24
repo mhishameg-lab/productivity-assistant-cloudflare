@@ -18,7 +18,13 @@ export function createTelegramApi(token, fetchImpl = fetch) {
           continue;
         }
         if (!response.ok) {
-          throw new Error(`Telegram API ${method} failed with HTTP ${response.status}.`);
+          const error = new Error(`Telegram API ${method} failed with HTTP ${response.status}.`);
+          if (method === "editMessageText" &&
+              response.status === 400 &&
+              /message is not modified/i.test(String(result.description || ""))) {
+            error.code = "MESSAGE_NOT_MODIFIED";
+          }
+          throw error;
         }
         if (!result.ok) throw new Error(`Telegram API ${method} returned an unsuccessful result.`);
         return result.result;
@@ -134,7 +140,13 @@ export function createTelegramApi(token, fetchImpl = fetch) {
               input_field_placeholder: response.inputPlaceholder || "Type one short answer"
             }
           : null;
-      return this.editMessageText(chatId, messageId, text || " ", replyMarkup);
+      return this.editMessageText(chatId, messageId, text || " ", replyMarkup)
+        .catch(error => {
+          if (error && error.code === "MESSAGE_NOT_MODIFIED") {
+            return { message_id: messageId, notModified: true };
+          }
+          throw error;
+        });
     },
 
     answerCallbackQuery(callbackQueryId, text) {

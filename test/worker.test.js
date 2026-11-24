@@ -25,7 +25,10 @@ import {
 } from "../src/db/google-tasks-repository.js";
 import { buildDailyTaskPlan, formatDailyTaskPlan } from "../src/core/daily-planner.js";
 import { createGoogleTasksClient } from "../src/integrations/google-tasks.js";
-import { createGoogleCalendarClient } from "../src/integrations/google-calendar.js";
+import {
+  cairoLocalDateTimeToIso,
+  createGoogleCalendarClient
+} from "../src/integrations/google-calendar.js";
 import { createGoogleGmailClient } from "../src/integrations/google-gmail.js";
 import { createGoogleAccessTokenProvider } from "../src/integrations/google-oauth.js";
 import { createTelegramApi } from "../src/channels/telegram-api.js";
@@ -66,12 +69,19 @@ import {
 } from "../src/core/format.js";
 import { say, selectToneTier } from "../src/core/voice.js";
 import { VOICE_BANK } from "../src/core/voice-bank.js";
-import { validateTelegramInitData, timingSafeEqual } from "../src/core/miniapp.js";
+import {
+  addTaskPageHtml,
+  miniAppResponse,
+  planPageHtml,
+  validateTelegramInitData,
+  timingSafeEqual
+} from "../src/core/miniapp.js";
 import { formatTaskStack } from "../src/core/assistant.js";
 import {
   createUserReminder,
   listPendingUserReminders,
-  parseUserReminder
+  parseUserReminder,
+  processUserReminders
 } from "../src/user-reminders.js";
 
 class TestD1Database {
@@ -185,6 +195,7 @@ test("v4 Stage 7 dive and sleep parsers fail safely", () => {
   const now = new Date("2026-11-24T22:00:00.000Z");
   assert.equal(parseSleepTime("07:30", now).toISOString(), "2026-11-25T05:30:00.000Z");
   assert.equal(parseSleepTime("7:30 AM", now).toISOString(), "2026-11-25T05:30:00.000Z");
+  assert.equal(parseSleepTime("12:30 AM", new Date("2026-04-23T10:00:00.000Z")), null);
 });
 
 test("v4 Stage 5 Mini App rejects unauthorized initData", async () => {
@@ -203,6 +214,23 @@ test("v4 Stage 5 Mini App rejects unauthorized initData", async () => {
   assert.equal(response.status, 401);
 });
 
+test("Mini App inline scripts satisfy a per-response CSP nonce and forms prevent navigation", async () => {
+  const response = miniAppResponse(planPageHtml("Martino"));
+  const csp = response.headers.get("Content-Security-Policy");
+  const nonce = csp.match(/'nonce-([a-f0-9]+)'/i)?.[1];
+  const html = await response.text();
+  const scriptTags = [...html.matchAll(/<script\b([^>]*)>/gi)];
+
+  assert.ok(nonce);
+  assert.ok(scriptTags.length >= 2);
+  for (const [, attributes] of scriptTags) {
+    assert.match(attributes, new RegExp(`\\bnonce="${nonce}"`));
+  }
+  assert.match(csp, /script-src[^;]*'nonce-/);
+  assert.match(planPageHtml("Martino"), /e\.preventDefault\(\)/);
+  assert.match(addTaskPageHtml("Martino"), /e\.preventDefault\(\)/);
+});
+
 test("v4 Stage 4 reminder parser and D1 limits", async () => {
   const now = new Date("2026-11-24T10:00:00.000Z");
   assert.equal(parseUserReminder("remind me in 30 minutes to stretch", now).text, "stretch");
@@ -211,6 +239,13 @@ test("v4 Stage 4 reminder parser and D1 limits", async () => {
   assert.equal(parseUserReminder("on Nov 25 at 3 PM", now).dueAtUtc !== null, true);
   assert.equal(parseUserReminder("11/25 3pm", now).dueAtUtc !== null, true);
   assert.equal(parseUserReminder("/remind 5pm call Ahmed", now).text, "call Ahmed");
+  assert.equal(parseUserReminder("11/31/2026 3pm", now), null);
+  assert.equal(cairoLocalDateTimeToIso("2026-04-24", "01:30"), "2026-04-23T22:30:00.000Z");
+  assert.throws(() => cairoLocalDateTimeToIso("2026-04-24", "00:30"), /does not exist/);
+  assert.equal(
+    parseUserReminder("on Apr 24 at 12:30 AM", new Date("2026-04-23T10:00:00.000Z")).invalidLocalTime,
+    true
+  );
 
   const { sqlite, d1 } = await createTestDatabase();
   const user = await getOrCreateChannelUser(d1, "telegram", "reminder-user", now.toISOString());
@@ -219,11 +254,196 @@ test("v4 Stage 4 reminder parser and D1 limits", async () => {
     user,
     text: "Call Ahmed",
     dueAtUtc: "2026-11-24T15:00:00.000Z",
-    now: now.toISOString()
+    now: now.toISOString(),
+    requestId: "stable-reminder-request"
   });
   assert.equal(created.text, "Call Ahmed");
+  const duplicate = await createUserReminder({
+    db: d1,
+    user,
+    text: "",
+    dueAtUtc: "2026-11-24T09:00:00.000Z",
+    now: now.toISOString(),
+    requestId: "stable-reminder-request"
+  });
+  assert.equal(duplicate.id, created.id);
+  assert.equal(duplicate.text, "Call Ahmed");
+  assert.equal(duplicate.duplicate, true);
   const pending = await listPendingUserReminders(d1, user.id, 8);
   assert.equal(pending.results.length, 1);
+  sqlite.close();
+});
+
+test("reminder date-first conversation stores the reminder after collecting text", async () => {
+  const { sqlite, d1 } = await createTestDatabase();
+  const now = new Date("2026-11-24T10:00:00.000Z");
+  const user = await getOrCreateChannelUser(d1, "telegram", "reminder-flow-user", now.toISOString());
+  const command = (updateId, text) => adaptTelegramUpdate({
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      chat: { id: 800 },
+      from: { id: 801 },
+      text
+    }
+  });
+  const prompt = await handleAssistantMessage({
+    db: d1,
+    user,
+    message: command(802, "/remind tomorrow at 9am"),
+    googleTasks: null,
+    now
+  });
+  assert.match(prompt.sections[0].lines[0], /what should i remind you about/i);
+
+  const saved = await handleAssistantMessage({
+    db: d1,
+    user,
+    message: command(803, "Call Alice"),
+    googleTasks: null,
+    now
+  });
+  assert.match(saved.sections[0].lines[0], /Call Alice/);
+  const reminder = sqlite.prepare(
+    "SELECT text, remind_at_utc FROM reminders WHERE user_id = ?1"
+  ).get(user.id);
+  assert.equal(reminder.text, "Call Alice");
+  assert.equal(reminder.remind_at_utc, "2026-11-25T07:00:00.000Z");
+  sqlite.close();
+});
+
+test("disabled reminder and Companion features do not create unscheduled state", async () => {
+  const { sqlite, d1 } = await createTestDatabase();
+  const now = new Date("2026-11-24T10:00:00.000Z");
+  const user = await getOrCreateChannelUser(d1, "telegram", "feature-gate-user", now.toISOString());
+  const base = {
+    db: d1,
+    user,
+    googleTasks: null,
+    userRemindersEnabled: false,
+    companionEnabled: false,
+    now
+  };
+  const command = (updateId, text) => adaptTelegramUpdate({
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      chat: { id: 700 },
+      from: { id: 701 },
+      text
+    }
+  });
+
+  const reminder = await handleAssistantMessage({
+    ...base,
+    message: command(702, "/remind 5pm call Ahmed")
+  });
+  const dive = await handleAssistantMessage({
+    ...base,
+    message: command(703, "/dive 1h")
+  });
+  const pulse = await handleAssistantMessage({
+    ...base,
+    workPulsesEnabled: false,
+    message: command(704, "/quiet 2h")
+  });
+  assert.match(reminder.sections[0].lines[0], /didn't create a reminder/i);
+  assert.match(dive.sections[0].lines[0], /paused right now/i);
+  assert.match(pulse.sections[0].lines[0], /turned off right now/i);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM reminders").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM companion_state").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM conversations").get().count, 0);
+  sqlite.close();
+});
+
+test("Worker enforces disabled reminder and Companion gates on Telegram updates", async () => {
+  const { sqlite, d1 } = await createTestDatabase();
+  const originalFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, options) => {
+    sent.push(JSON.parse(options.body));
+    return Response.json({ ok: true, result: { message_id: sent.length } });
+  };
+  const env = {
+    DB: d1,
+    DEPLOYMENT_STAGE: "production",
+    ASSISTANT_ENABLED: "true",
+    TELEGRAM_BOT_TOKEN: "test-bot-token",
+    TELEGRAM_WEBHOOK_SECRET: "test-webhook-secret",
+    AUTHORIZED_TELEGRAM_USER_ID: "801",
+    USER_REMINDERS_ENABLED: "false",
+    COMPANION_ENABLED: "false",
+    WORK_PULSES_ENABLED: "false"
+  };
+  try {
+    for (const [updateId, text] of [[810, "/remind 5pm call Alice"], [811, "/dive 1h"]]) {
+      const response = await worker.fetch(new Request("https://example.test/webhooks/telegram", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"
+        },
+        body: JSON.stringify({
+          update_id: updateId,
+          message: {
+            message_id: updateId,
+            chat: { id: 802 },
+            from: { id: 801 },
+            text
+          }
+        })
+      }), env);
+      assert.equal(response.status, 200);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].text, /didn't create a reminder/i);
+  assert.match(sent[1].text, /paused right now/i);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM reminders").get().count, 0);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM companion_state").get().count, 0);
+  sqlite.close();
+});
+
+test("failed reminder delivery is recorded as uncertain and logged", async () => {
+  const { sqlite, d1 } = await createTestDatabase();
+  const now = new Date("2026-11-24T10:00:00.000Z");
+  const user = await getOrCreateChannelUser(d1, "telegram", "reminder-delivery-user", now.toISOString());
+  await insertChannelMessage(d1, {
+    channel: "telegram",
+    conversationId: "reminder-chat",
+    externalMessageId: "incoming-1",
+    userId: user.id,
+    direction: "incoming",
+    type: "text",
+    createdAt: now.toISOString()
+  });
+  await d1.prepare(
+    `INSERT INTO reminders (
+       id, user_id, text, remind_at_utc, status, created_at, request_id
+     ) VALUES ('REM-delivery-1', ?1, 'Call back', ?2, 'pending', ?3, 'REQ-delivery-1')`
+  ).bind(user.id, new Date(now.getTime() - 60_000).toISOString(), now.toISOString()).run();
+
+  const result = await processUserReminders({
+    db: d1,
+    telegram: {
+      async sendAssistantResponse() {
+        throw new Error("Telegram API sendMessage failed with HTTP 503.");
+      }
+    },
+    now,
+    authorizedTelegramUserId: "reminder-delivery-user",
+    enabled: true
+  });
+
+  assert.equal(result.uncertain, 1);
+  assert.equal(sqlite.prepare("SELECT status FROM reminders WHERE id='REM-delivery-1'").get().status, "uncertain");
+  assert.equal(
+    sqlite.prepare("SELECT COUNT(*) AS count FROM system_logs WHERE component='User reminders' AND event_type='Reminder delivery uncertain'").get().count,
+    1
+  );
   sqlite.close();
 });
 
@@ -996,6 +1216,25 @@ test("Telegram client retries a rate-limited call once when retry delay is short
   const result = await telegram.sendMessage("700", "Scheduled message");
   assert.deepEqual(result, { message_id: 45 });
   assert.equal(requests, 2);
+});
+
+test("Telegram unchanged message edits do not trigger duplicate fallback sends", async () => {
+  let requests = 0;
+  const telegram = createTelegramApi("test-token", async () => {
+    requests++;
+    return Response.json({
+      ok: false,
+      description: "Bad Request: message is not modified"
+    }, { status: 400 });
+  });
+  const result = await telegram.editAssistantResponse("700", 45, {
+    title: "Same response",
+    sections: [{ heading: "", lines: ["No changes"] }]
+  });
+
+  assert.equal(result.message_id, 45);
+  assert.equal(result.notModified, true);
+  assert.equal(requests, 1);
 });
 
 test("callback updates become user actions without Telegram types in core intent", () => {
@@ -3375,7 +3614,8 @@ test("focus scheduler expires stale sessions and stays disabled without both gat
       rhythm: { sent: 0, skipped: 0 },
       reports: { generated: 0, sent: 0, skipped: 0 },
       escalations: { sent: 0, skipped: 0, failed: 0 },
-      calendarReminders: { sent: 0, skipped: 0, failed: 0 }
+      calendarReminders: { sent: 0, skipped: 0, failed: 0 },
+      taskReminders: { sent: 0, skipped: 0, failed: 0 }
     });
     assert.match(telegramSends[0].url, /\/sendMessage$/);
     assert.equal(telegramSends[0].body.chat_id, "700");

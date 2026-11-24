@@ -85,10 +85,35 @@ export async function handleAssistantMessage({
   naturalLanguageClassifier = null,
   aiDailyPlanner = null,
   emailFollowUpAnalyzer = null,
+  userRemindersEnabled = true,
+  companionEnabled = true,
+  workPulsesEnabled = true,
   now
 }) {
   let intent = resolveIntent(message);
-  if (intent.type === "user_message") {
+  if (intent.type === "command") {
+    const companionCommands = new Set(["zzz", "dive", "back", "pings", "pause"]);
+    if (!companionEnabled && companionCommands.has(intent.name)) {
+      return response("Rest mode unavailable", "Sleep, dive, and check-in controls are paused right now.");
+    }
+    if (!workPulsesEnabled && ["quiet", "pulses"].includes(intent.name)) {
+      return response("Work pulses paused", "Proactive work pulses are turned off right now.");
+    }
+    if (!userRemindersEnabled &&
+        ["remind", "reminders"].includes(intent.name) &&
+        String(intent.arguments || "").trim()) {
+      return response("Reminders paused", "Reminder delivery is paused right now, so I didn't create a reminder.");
+    }
+  }
+  if (intent.type === "user_message" && !companionEnabled &&
+      /^(?:going to sleep|goodnight|good night|نايم|leave me|heads down|سيبني)/iu.test(intent.text.trim())) {
+    return response("Rest mode unavailable", "Sleep and dive controls are paused right now.");
+  }
+  if (intent.type === "user_message" && !userRemindersEnabled &&
+      /^(?:remind me|in \d|tomorrow at|on .+ at|\d{1,2}\/\d{1,2})/i.test(intent.text.trim())) {
+    return response("Reminders paused", "Reminder delivery is paused right now, so I didn't create a reminder.");
+  }
+  if (intent.type === "user_message" && companionEnabled) {
     const activeSleep = await db.prepare(
       "SELECT id, wake_at FROM sleep_sessions WHERE user_id=?1 AND status='active' ORDER BY started_at DESC LIMIT 1"
     ).bind(user.id).first();
@@ -110,7 +135,7 @@ export async function handleAssistantMessage({
   if (intent.type === "user_action") {
     return handleAction({
       db, user, message, intent, googleTasks, googleCalendar, googleGmail,
-      aiDailyPlanner, now
+      aiDailyPlanner, userRemindersEnabled, companionEnabled, now
     });
   }
 
@@ -121,6 +146,12 @@ export async function handleAssistantMessage({
   if (intent.type === "user_message") {
     const state = await getConversationState(db, user.id, now.toISOString());
     if (state) {
+      if (!userRemindersEnabled && String(state.type).startsWith("reminder_")) {
+        return response("Reminders paused", "Reminder delivery is paused right now. Your saved reminder details were not changed.");
+      }
+      if (!companionEnabled && state.type === "sleep_time_custom") {
+        return response("Rest mode unavailable", "Sleep and dive controls are paused right now.");
+      }
       return handleConversationText({
         db, user, message, state, googleTasks, googleCalendar, aiDailyPlanner, now
       });
@@ -298,12 +329,8 @@ export async function handleAssistantMessage({
           { label: "Monthly project", action: "monthly_project_review" }
         ]]
       };
-    case "tasks":
-      return showTasks({ db, googleTasks, now });
     case "overdue":
       return showOverdueTasks({ db, googleTasks, now });
-    case "inbox":
-      return showInboxTriage({ db, googleGmail, emailFollowUpAnalyzer, now });
     case "accountability":
       return showManualAccountabilityCheckin({ db, now });
     case "goals":
@@ -332,8 +359,6 @@ export async function handleAssistantMessage({
         : null;
       return beginAvailableTimeRequest({ db, user, minutes, now });
     }
-    case "focus":
-      return beginFocusNow({ db, user, now });
     case "quiet": {
       const duration = parseQuietDuration(intent.arguments);
       if (!duration) return response("Quiet time", "Use /quiet 2h.");
@@ -369,9 +394,23 @@ async function handleAction({
   googleCalendar,
   googleGmail,
   aiDailyPlanner,
+  userRemindersEnabled = true,
+  companionEnabled = true,
   now
 }) {
   const identifier = intent.identifier;
+  const actionName = identifier.split("|")[0];
+  if (!companionEnabled && (
+    actionName === "back" ||
+    actionName.startsWith("sleep_") ||
+    actionName.startsWith("dive_") ||
+    actionName.startsWith("companion_")
+  )) {
+    return response("Rest mode unavailable", "Sleep, dive, and check-in controls are paused right now.");
+  }
+  if (!userRemindersEnabled && actionName.startsWith("reminder_")) {
+    return response("Reminders paused", "Reminder delivery is paused right now. Your saved reminder details were not changed.");
+  }
   if (identifier === "companion_stuck") {
     await db.prepare(
       `INSERT INTO companion_state (user_id,cairo_date,consecutive_ignored,tier_override_until,last_kind,last_proactive_at,sent_today_count,paused_until,dive_until,awake_until,updated_at)
@@ -480,9 +519,27 @@ async function handleAction({
         inputPlaceholder: "11/25/2026 3:00 PM"
       };
     }
-    const dateKey = cairoDateKey(now);
-    const due = new Date(cairoDateTimeToUtcForReminder(dateKey, reminderTime[1]));
-    if (due.getTime() <= now.getTime()) due.setUTCDate(due.getUTCDate() + 1);
+    let dateKey = cairoDateKey(now);
+    let due = reminderDateTime(dateKey, reminderTime[1]);
+    if (!due) return response("Reminder", "That Cairo time does not exist because the clocks change. Choose another time.");
+    if (due.getTime() <= now.getTime()) {
+      dateKey = shiftDateKey(dateKey, 1);
+      due = reminderDateTime(dateKey, reminderTime[1]);
+      if (!due) return response("Reminder", "That Cairo time does not exist because the clocks change. Choose another time.");
+    }
+    if (!String(state.text || "").trim()) {
+      await setConversationState(db, user.id, {
+        type: "reminder_text",
+        dueAtUtc: due.toISOString()
+      }, now.toISOString());
+      return {
+        category: "Reminder",
+        title: "",
+        sections: [{ heading: "", lines: ["What should I remind you about?"] }],
+        inputMode: "force_reply",
+        inputPlaceholder: "One short reminder"
+      };
+    }
     await createUserReminder({
       db, user, text: state.text, dueAtUtc: due.toISOString(), now: now.toISOString()
     });
@@ -1910,6 +1967,22 @@ async function handleConversationText({
     const duration = Math.round((wake.getTime() - now.getTime()) / 60_000);
     return response("Sleep", `Locked in. I'll wake you at ${timeLabel(wake)} ⏰ (that's ${durationLabel(duration)} from now). I'm staying quiet till then. Set a real alarm too, I'm just a notification.`);
   }
+  if (state.type === "reminder_text") {
+    if (text.length > 200) return response("Reminder", "Keep the reminder under 200 characters.");
+    if (!state.dueAtUtc || Date.parse(state.dueAtUtc) <= now.getTime()) {
+      await clearConversationState(db, user.id);
+      return response("Reminder", "That reminder time has passed. Start again with /remind.");
+    }
+    await createUserReminder({
+      db,
+      user,
+      text,
+      dueAtUtc: state.dueAtUtc,
+      now: now.toISOString()
+    });
+    await clearConversationState(db, user.id);
+    return response("Reminder", `Got it. I'll remind you to “${text}” at ${timeLabel(state.dueAtUtc)}. ⏰`);
+  }
   if (state.type === "reminder_time_custom") {
     const parsed = parseCairoDateTime(text, now);
     if (!parsed) return {
@@ -1919,7 +1992,8 @@ async function handleConversationText({
       inputMode: "force_reply",
       inputPlaceholder: "11/25/2026 3:00 PM"
     };
-    const due = new Date(cairoDateTimeToUtcForReminder(parsed.dateKey, parsed.time));
+    const due = reminderDateTime(parsed.dateKey, parsed.time);
+    if (!due) return response("Reminder", "That Cairo time does not exist because the clocks change. Choose another time.");
     if (due.getTime() <= now.getTime()) return response("Reminder", "That time has passed. Choose a future time.");
     await createUserReminder({
       db, user, text: state.text, dueAtUtc: due.toISOString(), now: now.toISOString()
@@ -3845,16 +3919,13 @@ async function createQuickCapturedTask({ db, user, googleTasks, capture, now }) 
   });
 }
 
-function cairoDateTimeToUtcForReminder(dateKey, time) {
-  const [hour, minute] = time.split(":").map(Number);
-  const utc = new Date(`${dateKey}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00Z`);
-  const offset = Number(cairoOffsetMinutes(utc));
-  return new Date(utc.getTime() - offset * 60_000).toISOString();
-}
-
-function cairoOffsetMinutes(date) {
-  const month = date.getUTCMonth();
-  return month >= 3 && month <= 9 ? 180 : 120;
+function reminderDateTime(dateKey, time) {
+  try {
+    return new Date(cairoLocalDateTimeToIso(dateKey, time));
+  } catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
 }
 
 function parseQuietDuration(text) {
@@ -4007,6 +4078,9 @@ async function handleUserReminderCommand({ db, user, intent, now }) {
   }
   const parsed = parseUserReminder(argumentsText, now);
   if (!parsed) return response("Reminder", "Add reminder text and a time.");
+  if (parsed.invalidLocalTime) {
+    return response("Reminder", "That Cairo time does not exist because the clocks change. Choose another time.");
+  }
   if (parsed.pastTime) return response("Reminder", "That time has passed. Choose a future time.");
   if (!parsed.dueAtUtc) {
     await setConversationState(db, user.id, {
@@ -4022,6 +4096,19 @@ async function handleUserReminderCommand({ db, user, intent, now }) {
         { label: "12:00 PM", action: "reminder_time|12:00" },
         { label: "5:00 PM", action: "reminder_time|17:00" }
       ], [{ label: "Custom", action: "reminder_time|custom" }]]
+    };
+  }
+  if (!parsed.text) {
+    await setConversationState(db, user.id, {
+      type: "reminder_text",
+      dueAtUtc: parsed.dueAtUtc
+    }, now.toISOString());
+    return {
+      category: "Reminder",
+      title: "",
+      sections: [{ heading: "", lines: ["What should I remind you about?"] }],
+      inputMode: "force_reply",
+      inputPlaceholder: "One short reminder"
     };
   }
   await createUserReminder({

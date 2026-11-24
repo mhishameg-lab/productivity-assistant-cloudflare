@@ -1,4 +1,12 @@
-import { cairoDateKey, parseDateInput, parseTimeInput, shortDate, timeLabel } from "./core/format.js";
+import {
+  cairoDateKey,
+  parseDateInput,
+  parseTimeInput,
+  shortDate,
+  shiftDateKey,
+  timeLabel
+} from "./core/format.js";
+import { cairoLocalDateTimeToIso } from "./integrations/google-calendar.js";
 import { insertChannelMessage, logSystemEvent } from "./db/channel-repository.js";
 
 export function parseUserReminder(text, now = new Date()) {
@@ -9,9 +17,16 @@ export function parseUserReminder(text, now = new Date()) {
   if (timeFirst) {
     const time = parseTimeInput(timeFirst[1]);
     const dateKey = nextCairoDateForTime(time, now);
-    const due = new Date(cairoDateTimeToUtc(dateKey, time));
+    if (!dateKey) {
+      return { text: timeFirst[2].trim().slice(0, 200), dueAtUtc: null, invalidLocalTime: true };
+    }
+    const dueAtUtc = cairoDateTimeToUtc(dateKey, time);
+    if (!dueAtUtc) {
+      return { text: timeFirst[2].trim().slice(0, 200), dueAtUtc: null, invalidLocalTime: true };
+    }
+    const due = new Date(dueAtUtc);
     if (due.getTime() <= now.getTime()) return { text: timeFirst[2].trim().slice(0, 200), dueAtUtc: null, pastTime: true };
-    return { text: timeFirst[2].trim().slice(0, 200), dueAtUtc: due.toISOString() };
+    return { text: timeFirst[2].trim().slice(0, 200), dueAtUtc };
   }
   if (/^in\s+(\d+(?:\.\d+)?)\s+(minute|minutes|min|mins|hour|hours|hrs)\s+(?:to\s+)?(.+)$/i.test(input)) {
     const match = input.match(/^in\s+(\d+(?:\.\d+)?)\s+(minute|minutes|min|mins|hour|hours|hrs)\s+(?:to\s+)?(.+)$/i);
@@ -30,7 +45,6 @@ export function parseUserReminder(text, now = new Date()) {
     return { text: "", dueAtUtc: due.toISOString(), seconds: minutes * 60 };
   }
 
-  const atMatch = input.match(/^(.+?)\s+(?:at\s+)?(.+)$/i);
   let reminderText = input;
   let time = null;
   let dateKey = null;
@@ -39,6 +53,7 @@ export function parseUserReminder(text, now = new Date()) {
   if (slashDateTime) {
     dateKey = parseDateInput(slashDateTime[1], now);
     time = parseTimeInput(slashDateTime[2]);
+    if (!dateKey || !time) return null;
     reminderText = "";
   }
 
@@ -46,6 +61,7 @@ export function parseUserReminder(text, now = new Date()) {
   if (namedDateTime) {
     dateKey = parseDateInput(namedDateTime[1].replace(/^on\s+/i, ""), now);
     time = parseTimeInput(namedDateTime[2]);
+    if (!dateKey || !time) return null;
     reminderText = "";
   }
 
@@ -66,13 +82,36 @@ export function parseUserReminder(text, now = new Date()) {
     return { text: reminderText.replace(/^to\s+/i, "").trim().slice(0, 200), dueAtUtc: null };
   }
   if (!dateKey) dateKey = nextCairoDateForTime(time, now);
-  const due = new Date(cairoDateTimeToUtc(dateKey, time));
+  if (!dateKey) {
+    return { text: reminderText.slice(0, 200), dueAtUtc: null, invalidLocalTime: true };
+  }
+  const dueAtUtc = cairoDateTimeToUtc(dateKey, time);
+  if (!dueAtUtc) {
+    return { text: reminderText.slice(0, 200), dueAtUtc: null, invalidLocalTime: true };
+  }
+  const due = new Date(dueAtUtc);
   if (due.getTime() <= now.getTime()) return { text: reminderText.slice(0, 200), dueAtUtc: null, pastTime: true };
-  return { text: reminderText.replace(/^to\s+/i, "").trim().slice(0, 200), dueAtUtc: due.toISOString() };
+  return { text: reminderText.replace(/^to\s+/i, "").trim().slice(0, 200), dueAtUtc };
 }
 
 export async function createUserReminder({ db, user, text, dueAtUtc, now, requestId = null }) {
-  if (!text || text.length > 200) throw new TypeError("Reminder text is required and limited to 200 characters.");
+  const marker = requestId || `REMREQ-${crypto.randomUUID()}`;
+  const existing = await db.prepare(
+    `SELECT id, text, remind_at_utc, request_id
+       FROM reminders
+      WHERE request_id = ?1 AND user_id = ?2`
+  ).bind(marker, user.id).first();
+  if (existing) {
+    return {
+      id: existing.id,
+      text: existing.text,
+      dueAtUtc: existing.remind_at_utc,
+      requestId: existing.request_id,
+      duplicate: true
+    };
+  }
+  const normalizedText = String(text || "").trim();
+  if (!normalizedText || normalizedText.length > 200) throw new TypeError("Reminder text is required and limited to 200 characters.");
   if (!dueAtUtc || Number.isNaN(Date.parse(dueAtUtc))) throw new TypeError("Reminder time is required.");
   if (Date.parse(dueAtUtc) <= Date.parse(now)) throw new RangeError("Reminder time must be in the future.");
   const pending = await db.prepare(
@@ -80,14 +119,25 @@ export async function createUserReminder({ db, user, text, dueAtUtc, now, reques
   ).bind(user.id).first();
   if (Number(pending.count) >= 100) throw new RangeError("The 100 pending reminder limit was reached.");
   const id = `REM-${crypto.randomUUID()}`;
-  const marker = requestId || `REMREQ-${crypto.randomUUID()}`;
-  await db.prepare(
+  const inserted = await db.prepare(
     `INSERT INTO reminders (
        id, user_id, text, remind_at_utc, status, created_at, ping_count, snooze_count, request_id
      ) VALUES (?1, ?2, ?3, ?4, 'pending', ?5, 0, 0, ?6)
      ON CONFLICT(request_id) DO NOTHING`
-  ).bind(id, user.id, text, dueAtUtc, now, marker).run();
-  return { id, text, dueAtUtc, requestId: marker };
+  ).bind(id, user.id, normalizedText, dueAtUtc, now, marker).run();
+  const saved = await db.prepare(
+    `SELECT id, text, remind_at_utc, request_id
+       FROM reminders
+      WHERE request_id = ?1 AND user_id = ?2`
+  ).bind(marker, user.id).first();
+  if (!saved) throw new Error("Could not retrieve the saved reminder.");
+  return {
+    id: saved.id,
+    text: saved.text,
+    dueAtUtc: saved.remind_at_utc,
+    requestId: saved.request_id,
+    duplicate: Boolean(inserted.meta && inserted.meta.changes === 0)
+  };
 }
 
 export async function listPendingUserReminders(db, userId, limit = 8) {
@@ -116,6 +166,7 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
   ).bind(now.toISOString()).all();
   let sent = 0;
   let missed = 0;
+  let uncertain = 0;
   for (const row of due.results) {
     const claimed = await db.prepare(
       `UPDATE reminders
@@ -158,6 +209,16 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
         `UPDATE reminders SET status='uncertain'
           WHERE id=?1 AND status='sending'`
       ).bind(claimed.id).run();
+      await logSystemEvent(db, {
+        occurredAt: now.toISOString(),
+        severity: "ERROR",
+        component: "User reminders",
+        eventType: "Reminder delivery uncertain",
+        description: "Telegram could not confirm reminder delivery.",
+        relatedRecordId: claimed.id,
+        errorMessage: error && error.message ? String(error.message).slice(0, 300) : "Telegram delivery failed"
+      });
+      uncertain++;
     }
   }
   const sentOld = await db.prepare(
@@ -179,14 +240,27 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
         });
         await db.prepare("UPDATE reminders SET ping_count=ping_count+1 WHERE id=?1")
           .bind(reminder.id).run();
-      } catch {}
+      } catch (error) {
+        await db.prepare("UPDATE reminders SET status='uncertain' WHERE id=?1")
+          .bind(reminder.id).run();
+        await logSystemEvent(db, {
+          occurredAt: now.toISOString(),
+          severity: "ERROR",
+          component: "User reminders",
+          eventType: "Reminder follow-up delivery uncertain",
+          description: "Telegram could not confirm reminder follow-up delivery.",
+          relatedRecordId: reminder.id,
+          errorMessage: error && error.message ? String(error.message).slice(0, 300) : "Telegram delivery failed"
+        });
+        uncertain++;
+      }
     } else {
       await db.prepare("UPDATE reminders SET status='missed' WHERE id=?1")
         .bind(reminder.id).run();
       missed++;
     }
   }
-  return { sent, snoozed: 0, missed, uncertain: 0 };
+  return { sent, snoozed: 0, missed, uncertain };
 }
 
 async function findTarget(db, authorizedTelegramUserId) {
@@ -205,24 +279,18 @@ async function findTarget(db, authorizedTelegramUserId) {
 
 function nextCairoDateForTime(time, now) {
   const today = cairoDateKey(now);
-  const due = new Date(cairoDateTimeToUtc(today, time));
-  return due.getTime() > now.getTime() ? today : new Date(Date.parse(`${today}T12:00:00Z`) + 86400_000).toISOString().slice(0, 10);
+  const dueAtUtc = cairoDateTimeToUtc(today, time);
+  if (!dueAtUtc) return null;
+  if (Date.parse(dueAtUtc) > now.getTime()) return today;
+  const tomorrow = shiftDateKey(today, 1);
+  return cairoDateTimeToUtc(tomorrow, time) ? tomorrow : null;
 }
 
 function cairoDateTimeToUtc(dateKey, time) {
-  const [hour, minute] = time.split(":").map(Number);
-  const utcGuess = new Date(`${dateKey}T${String(hour).padStart(2,"0")}:${String(minute).padStart(2,"0")}:00Z`);
-  const cairoOffset = Intl.DateTimeFormat("en-US", {
-    timeZone: "Africa/Cairo",
-    timeZoneName: "shortOffset"
-  }).formatToParts(utcGuess).find(part => part.type === "timeZoneName");
-  const offsetMinutes = parseOffsetMinutes(cairoOffset ? cairoOffset.value : "GMT+2");
-  return new Date(utcGuess.getTime() - offsetMinutes * 60_000).toISOString();
-}
-
-function parseOffsetMinutes(value) {
-  const match = String(value).match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/i);
-  if (!match) return 120;
-  const sign = match[1] === "-" ? -1 : 1;
-  return sign * (Number(match[2]) * 60 + Number(match[3] || 0));
+  try {
+    return cairoLocalDateTimeToIso(dateKey, time);
+  } catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
 }

@@ -232,15 +232,25 @@ export async function handleScheduledEvent(controller, env, ctx) {
     now,
     enabled: env.CALENDAR_REMINDERS_ENABLED === "true"
   });
-  await processOverdueTaskReminders({
+  const taskReminders = await processOverdueTaskReminders({
     db: env.DB,
     telegram,
     googleTasks,
     authorizedTelegramUserId: env.AUTHORIZED_TELEGRAM_USER_ID,
     now,
-    enabled: false
+    enabled: env.TASK_REMINDERS_ENABLED === "true"
   });
-  return { focus, pulses, userReminders, companion, rhythm, reports, escalations, calendarReminders };
+  return {
+    focus,
+    pulses,
+    userReminders,
+    companion,
+    rhythm,
+    reports,
+    escalations,
+    calendarReminders,
+    taskReminders
+  };
 }
 
 async function performTelegramWebhookCutover(env, now) {

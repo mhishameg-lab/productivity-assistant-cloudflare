@@ -1,5 +1,13 @@
-import { cairoDateKey, cairoTimeParts, durationLabel, parseTimeInput, timeLabel } from "./core/format.js";
-import { insertChannelMessage, logSystemEvent } from "./db/channel-repository.js";
+import {
+  cairoDateKey,
+  cairoTimeParts,
+  durationLabel,
+  parseTimeInput,
+  shiftDateKey,
+  timeLabel
+} from "./core/format.js";
+import { cairoLocalDateTimeToIso } from "./integrations/google-calendar.js";
+import { logSystemEvent } from "./db/channel-repository.js";
 
 export function parseDiveDuration(text) {
   const input = String(text || "").trim();
@@ -23,11 +31,25 @@ export function parseSleepTime(text, now = new Date()) {
   const input = String(text || "").trim();
   const time = parseTimeInput(input);
   if (!time) return null;
-  const date = cairoDateKey(now);
-  const due = new Date(cairoDateTimeToUtc(date, time));
-  if (due.getTime() <= now.getTime()) due.setUTCDate(due.getUTCDate() + 1);
+  let date = cairoDateKey(now);
+  let due = sleepDateTime(date, time);
+  if (!due) return null;
+  if (due.getTime() <= now.getTime()) {
+    date = shiftDateKey(date, 1);
+    due = sleepDateTime(date, time);
+    if (!due) return null;
+  }
   if (due.getTime() - now.getTime() > 14 * 60 * 60_000) return null;
   return due;
+}
+
+function sleepDateTime(dateKey, time) {
+  try {
+    return new Date(cairoLocalDateTimeToIso(dateKey, time));
+  } catch (error) {
+    if (error instanceof TypeError) return null;
+    throw error;
+  }
 }
 
 export async function startDive({ db, user, minutes, now }) {
@@ -194,13 +216,6 @@ export async function processCompanion({
        updated_at=?4`
   ).bind(target.userId, date, now.toISOString(), now.toISOString()).run();
   return { sent: 1, ignored: 0, cared: 0 };
-}
-
-function cairoDateTimeToUtc(dateKey, time) {
-  const [hour, minute] = time.split(":").map(Number);
-  const utc = new Date(`${dateKey}T${String(hour).padStart(2,"0")}:${String(minute).padStart(2,"0")}:00Z`);
-  const offset = /^(3|4|5|6|7|8|9|10)$/.test(String(utc.getUTCMonth() + 1)) ? 180 : 120;
-  return new Date(utc.getTime() - offset * 60_000).toISOString();
 }
 
 async function findTarget(db, authorizedTelegramUserId) {

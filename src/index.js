@@ -9,7 +9,10 @@ import {
   insertChannelMessage,
   logSystemEvent
 } from "./db/channel-repository.js";
-import { createGoogleCalendarClient } from "./integrations/google-calendar.js";
+import {
+  cairoLocalDateTimeToIso,
+  createGoogleCalendarClient
+} from "./integrations/google-calendar.js";
 import { createGoogleGmailClient } from "./integrations/google-gmail.js";
 import { createGoogleTasksClient } from "./integrations/google-tasks.js";
 import { classifyNaturalLanguageIntent } from "./ai/intent-classifier.js";
@@ -78,10 +81,7 @@ export default {
         "/app/rest",
         "/app/settings"
       ].includes(url.pathname)) {
-        const nameRow = await env.DB.prepare(
-          "SELECT setting_value FROM settings WHERE setting_key = 'display_name'"
-        ).first();
-        const name = nameRow && nameRow.setting_value ? nameRow.setting_value : "Mohamed";
+        const name = "there";
         const page = url.pathname === "/app/home"
           ? homePageHtml(name)
           : url.pathname === "/app/rest"
@@ -107,6 +107,7 @@ export default {
           dateLabel: shortDate(date),
           settings: Object.fromEntries(settings.results.map(row => [row.setting_key, row.setting_value])),
           outcomes: outcomes.results,
+          noPlan: outcomes.results.length === 0,
           tasks: tasks.results
         });
       }
@@ -291,6 +292,9 @@ export default {
         naturalLanguageClassifier,
         aiDailyPlanner,
         emailFollowUpAnalyzer,
+        userRemindersEnabled: env.USER_REMINDERS_ENABLED === "true",
+        companionEnabled: env.COMPANION_ENABLED === "true",
+        workPulsesEnabled: env.WORK_PULSES_ENABLED === "true",
         now
       });
 
@@ -536,34 +540,50 @@ async function saveMiniAppTask(request, env) {
 }
 
 async function saveMiniAppReminder(request, env) {
+  if (env.USER_REMINDERS_ENABLED !== "true") {
+    return jsonResponse({ error: "Reminder delivery is paused." }, 503);
+  }
   let body;
   try {
     body = await request.json();
   } catch {
     return jsonResponse({ error: "Invalid JSON." }, 400);
   }
-  if (!body || typeof body.requestId !== "string" || !body.text ||
-      typeof body.text !== "string" || !body.text.trim()) {
-    return jsonResponse({ error: "Request id and reminder text are required." }, 400);
+  if (!body ||
+      typeof body.requestId !== "string" ||
+      !body.requestId.trim() ||
+      body.requestId.length > 128) {
+    return jsonResponse({ error: "A valid request id is required." }, 400);
   }
-  const existing = await env.DB.prepare(
-    "SELECT id FROM mini_app_requests WHERE id = ?1"
-  ).bind(body.requestId).first();
-  if (existing) return jsonResponse({ ok: true, duplicate: true });
-  await env.DB.prepare(
-    `INSERT INTO mini_app_requests (id, created_at, status)
-     VALUES (?1, ?2, 'Processing')`
-  ).bind(body.requestId, new Date().toISOString()).run();
+  if (typeof body.text !== "string" || !body.text.trim() || body.text.trim().length > 200) {
+    return jsonResponse({ error: "Reminder text is required and must be 200 characters or fewer." }, 400);
+  }
+      const existingReminder = await env.DB.prepare(
+        "SELECT id FROM reminders WHERE request_id = ?1"
+      ).bind(body.requestId).first();
+      if (existingReminder) return jsonResponse({ ok: true, duplicate: true });
   const now = new Date();
   let dueAtUtc = "";
   if (typeof body.dueAtUtc === "string" && body.dueAtUtc) {
     dueAtUtc = body.dueAtUtc;
-  } else if (body.inMinutes) {
-    dueAtUtc = new Date(now.getTime() + Number(body.inMinutes) * 60_000).toISOString();
+  } else if (body.inMinutes !== undefined && body.inMinutes !== null && body.inMinutes !== "") {
+    const minutes = Number(body.inMinutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      return jsonResponse({ error: "Choose a positive reminder delay." }, 400);
+    }
+    dueAtUtc = new Date(now.getTime() + minutes * 60_000).toISOString();
   } else if (body.dueDate && body.dueTime) {
-    dueAtUtc = new Date(`${body.dueDate}T${body.dueTime}:00Z`).toISOString();
+    try {
+      dueAtUtc = cairoLocalDateTimeToIso(body.dueDate, body.dueTime);
+    } catch (error) {
+      if (error instanceof TypeError) {
+        return jsonResponse({ error: "Choose a valid Cairo-local date and time." }, 400);
+      }
+      throw error;
+    }
   }
-  if (!dueAtUtc || Date.parse(dueAtUtc) <= now.getTime()) {
+  const dueAt = Date.parse(dueAtUtc);
+  if (!dueAtUtc || Number.isNaN(dueAt) || dueAt <= now.getTime()) {
     return jsonResponse({ error: "Choose a future reminder time." }, 400);
   }
   const user = await getOrCreateChannelUser(
@@ -572,18 +592,20 @@ async function saveMiniAppReminder(request, env) {
     String(env.AUTHORIZED_TELEGRAM_USER_ID),
     now.toISOString()
   );
-  await createUserReminder({
+  const reminder = await createUserReminder({
     db: env.DB,
     user,
-    text: body.text.trim().slice(0, 200),
+    text: body.text.trim(),
     dueAtUtc,
     now: now.toISOString(),
     requestId: body.requestId
   });
   await env.DB.prepare(
-    "UPDATE mini_app_requests SET status = 'Completed' WHERE id = ?1"
-  ).bind(body.requestId).run();
-  return jsonResponse({ ok: true });
+    `INSERT INTO mini_app_requests (id, created_at, status)
+     VALUES (?1, ?2, 'Completed')
+     ON CONFLICT(id) DO UPDATE SET status = 'Completed', error_details = ''`
+  ).bind(body.requestId, now.toISOString()).run();
+  return jsonResponse({ ok: true, duplicate: reminder.duplicate });
 }
 
 async function saveMiniAppCompletion(request, env) {
