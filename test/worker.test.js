@@ -50,6 +50,7 @@ import {
   prioritizeReviewRecommendations
 } from "../src/ai/review-analyzer.js";
 import { createGoal, updateGoalKeyResult } from "../src/db/goal-repository.js";
+import { parseDiveDuration, parseSleepTime } from "../src/companion.js";
 import {
   areaLabel,
   longDate,
@@ -130,6 +131,7 @@ async function createTestDatabase() {
   const v4Stage1Migration = await readFile(new URL("../migrations/0009_v4_stage1.sql", import.meta.url), "utf8");
   const v4Stage2Migration = await readFile(new URL("../migrations/0010_v4_stage2.sql", import.meta.url), "utf8");
   const v4Stage4Migration = await readFile(new URL("../migrations/0011_v4_stage4_reminders.sql", import.meta.url), "utf8");
+  const v4Stage7Migration = await readFile(new URL("../migrations/0012_v4_stage7_companion.sql", import.meta.url), "utf8");
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(initialSchema);
   sqlite.exec(focusSessionsMigration);
@@ -142,9 +144,21 @@ async function createTestDatabase() {
   sqlite.exec(v4Stage1Migration);
   sqlite.exec(v4Stage2Migration);
   sqlite.exec(v4Stage4Migration);
+  sqlite.exec(v4Stage7Migration);
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
+
+test("v4 Stage 7 dive and sleep parsers fail safely", () => {
+  assert.equal(parseDiveDuration("/dive 2h"), 120);
+  assert.equal(parseDiveDuration("/dive 90m"), 90);
+  assert.equal(parseDiveDuration("leave me alone 1.5 hours"), 90);
+  assert.equal(parseDiveDuration("سيبني ساعتين"), 120);
+  assert.equal(parseDiveDuration("/dive 14h"), null);
+  const now = new Date("2026-11-24T22:00:00.000Z");
+  assert.equal(parseSleepTime("07:30", now).toISOString(), "2026-11-25T05:30:00.000Z");
+  assert.equal(parseSleepTime("7:30 AM", now).toISOString(), "2026-11-25T05:30:00.000Z");
+});
 
 test("v4 Stage 5 Mini App rejects unauthorized initData", async () => {
   const { d1 } = await createTestDatabase();
@@ -3330,6 +3344,7 @@ test("focus scheduler expires stale sessions and stays disabled without both gat
       focus: { sent: 1, considered: 1 },
       pulses: { sent: 0, skipped: 0, ignored: 0 },
       userReminders: { sent: 0, snoozed: 0, missed: 0, uncertain: 0 },
+      companion: { sent: 0, ignored: 0, cared: 0 },
       rhythm: { sent: 0, skipped: 0 },
       reports: { generated: 0, sent: 0, skipped: 0 },
       escalations: { sent: 0, skipped: 0, failed: 0 },

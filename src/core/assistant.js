@@ -63,6 +63,7 @@ import {
   shortDate,
   dateTimeLabel,
   greetingLine,
+  durationLabel,
   timeLabel
 } from "./format.js";
 import { getDisplayName, say } from "./voice.js";
@@ -71,6 +72,7 @@ import {
   listPendingUserReminders,
   parseUserReminder
 } from "../user-reminders.js";
+import { endDive, parseDiveDuration, parseSleepTime, startDive, startSleep } from "../companion.js";
 
 export async function handleAssistantMessage({
   db,
@@ -85,6 +87,25 @@ export async function handleAssistantMessage({
   now
 }) {
   let intent = resolveIntent(message);
+  if (intent.type === "user_message") {
+    const activeSleep = await db.prepare(
+      "SELECT id, wake_at FROM sleep_sessions WHERE user_id=?1 AND status='active' ORDER BY started_at DESC LIMIT 1"
+    ).bind(user.id).first();
+    if (activeSleep) {
+      await db.prepare(
+        "UPDATE sleep_sessions SET status='woke', acked_at=?1 WHERE id=?2"
+      ).bind(now.toISOString(), activeSleep.id).run();
+      return {
+        category: "Early wake",
+        title: "",
+        sections: [{ heading: "", lines: ["Oh you're up already. Sleep mode off. Want to go back to bed?"] }],
+        actions: [[
+          { label: "😴 Back to sleep", action: `sleep_back|${activeSleep.wake_at}` },
+          { label: "📱 HQ", action: "home" }
+        ]]
+      };
+    }
+  }
   if (intent.type === "user_action") {
     return handleAction({
       db, user, message, intent, googleTasks, googleCalendar, googleGmail,
@@ -102,6 +123,32 @@ export async function handleAssistantMessage({
       return handleConversationText({
         db, user, message, state, googleTasks, googleCalendar, aiDailyPlanner, now
       });
+    }
+    if (/^(?:going to sleep|goodnight|good night|نايم)$/iu.test(intent.text.trim())) {
+      return showSleepPrompt(now);
+    }
+    if (/^(?:leave me|heads down|سيبني)/iu.test(intent.text.trim())) {
+      const minutes = parseDiveDuration(intent.text);
+      if (!minutes) return {
+        category: "Dive",
+        title: "",
+        sections: [{ heading: "", lines: ["How long?"] }],
+        actions: [[
+          { label: "1 h", action: "dive_start|60" },
+          { label: "2 h", action: "dive_start|120" },
+          { label: "3 h", action: "dive_start|180" }
+        ]]
+      };
+      const until = await startDive({ db, user, minutes, now });
+      return {
+        category: "Dive",
+        title: "",
+        sections: [{ heading: "", lines: [`Bet. 🎧 I'm gone for ${durationLabel(minutes)}. I'll hit you at ${timeLabel(until)}.`] }],
+        actions: [[
+          { label: "I'm back", action: "back" },
+          { label: "+30 min", action: "dive_extend|30" }
+        ]]
+      };
     }
     if (/^(?:remind me|in \d|tomorrow at|on .+ at|\d{1,2}\/\d{1,2})/i.test(intent.text.trim())) {
       return handleUserReminderCommand({
@@ -205,6 +252,17 @@ export async function handleAssistantMessage({
     case "remind":
     case "reminders":
       return handleUserReminderCommand({ db, user, intent, now });
+    case "zzz":
+      return showSleepPrompt(now);
+    case "dive":
+      return handleDiveCommand({ db, user, intent, now });
+    case "back":
+      await endDive(db, user.id, now);
+      return response("Dive", "Welcome back. Check-ins can resume.");
+    case "pings":
+      return updatePingsSetting(db, intent.arguments, now);
+    case "pause":
+      return pauseCompanion(db, user, intent.arguments, now);
     case "help":
       return {
         category: "Control panel",
@@ -313,6 +371,85 @@ async function handleAction({
   now
 }) {
   const identifier = intent.identifier;
+  if (identifier === "companion_stuck") {
+    await db.prepare(
+      `INSERT INTO companion_state (user_id,cairo_date,consecutive_ignored,tier_override_until,last_kind,last_proactive_at,sent_today_count,paused_until,dive_until,awake_until,updated_at)
+       VALUES (?1,?2,3,?3,'stuck',?4,0,NULL,NULL,NULL,?5)
+       ON CONFLICT(user_id) DO UPDATE SET
+         consecutive_ignored=3,tier_override_until=excluded.tier_override_until,last_kind='stuck',updated_at=excluded.updated_at`
+    ).bind(user.id, cairoDateKey(now), new Date(`${cairoDateKey(now)}T23:59:59Z`).toISOString(), now.toISOString(), now.toISOString()).run();
+    return {
+      category: "Stuck",
+      title: "",
+      sections: [{ heading: "", lines: ["What is blocking it?"] }],
+      actions: [[
+        { label: "Too big", action: "fr|none|unclear" },
+        { label: "Low energy", action: "fr|none|energy" },
+        { label: "External", action: "fr|none|external" }
+      ]]
+    };
+  }
+  if (identifier === "companion_later") {
+    await db.prepare("UPDATE checkin_log SET status='ignored' WHERE user_id=?1 AND status='sent'")
+      .bind(user.id).run();
+    return response("Later", "Later. No task status changed.");
+  }
+  const sleepBack = identifier.match(/^sleep_back\|(.+)$/);
+  if (sleepBack) {
+    const wake = new Date(sleepBack[1]);
+    if (wake.getTime() > now.getTime()) {
+      await startSleep({ db, user, wakeAt: wake, now });
+      return response("Sleep", `Locked back in. I'll wake you at ${timeLabel(wake)}.`);
+    }
+  }
+  const diveExtend = identifier.match(/^dive_extend\|(30)$/);
+  if (diveExtend) {
+    const state = await db.prepare("SELECT dive_until FROM companion_state WHERE user_id=?1")
+      .bind(user.id).first();
+    const until = new Date((state && state.dive_until ? Date.parse(state.dive_until) : now.getTime()) + 30 * 60_000);
+    await db.prepare("UPDATE companion_state SET dive_until=?1, updated_at=?2 WHERE user_id=?3")
+      .bind(until.toISOString(), now.toISOString(), user.id).run();
+    return response("Dive", `Added 30 min. Back at ${timeLabel(until)}.`);
+  }
+  const sleepTime = identifier.match(/^sleep_time\|(06:00|07:00|08:00|09:00|custom)$/);
+  if (sleepTime) {
+    if (sleepTime[1] === "custom") {
+      await setConversationState(db, user.id, { type: "sleep_time_custom" }, now.toISOString());
+      return {
+        category: "Sleep",
+        title: "",
+        sections: [{ heading: "", lines: ["Enter a wake time, for example 7:30 AM."] }],
+        inputMode: "force_reply",
+        inputPlaceholder: "7:30 AM"
+      };
+    }
+    const wake = parseSleepTime(sleepTime[1], now);
+    if (!wake) return response("Sleep", "Choose a wake time in the future.");
+    await startSleep({ db, user, wakeAt: wake, now });
+    const duration = Math.round((wake.getTime() - now.getTime()) / 60_000);
+    return response("Sleep", `Locked in. I'll wake you at ${timeLabel(wake)} ⏰ (that's ${durationLabel(duration)} from now). I'm staying quiet till then. Set a real alarm too, I'm just a notification.`);
+  }
+  if (identifier === "sleep_up") {
+    await db.prepare(
+      `UPDATE sleep_sessions SET status='woke', acked_at=?1
+        WHERE user_id=?2 AND status='active'`
+    ).bind(now.toISOString(), user.id).run();
+    return showCalmHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner: null, now });
+  }
+  const diveStart = identifier.match(/^dive_start\|(60|120|180)$/);
+  if (diveStart) {
+    const until = await startDive({ db, user, minutes: Number(diveStart[1]), now });
+    return {
+      category: "Dive",
+      title: "",
+      sections: [{ heading: "", lines: [`Bet. 🎧 I'm gone for ${durationLabel(Number(diveStart[1]))}. I'll hit you at ${timeLabel(until)}.`] }],
+      actions: [[{ label: "I'm back", action: "back" }, { label: "+30 min", action: "dive_extend|30" }]]
+    };
+  }
+  if (identifier === "back") {
+    await endDive(db, user.id, now);
+    return response("Dive", "🎧 You're back. Welcome back. What was the win?");
+  }
   const nightConfirm = identifier.match(/^night_confirm\|(\d{4}-\d{2}-\d{2})$/);
   if (nightConfirm) {
     const date = nightConfirm[1];
@@ -1764,6 +1901,14 @@ async function handleConversationText({
 }) {
   const text = String(message.message.text || "").trim();
   if (!text) return null;
+  if (state.type === "sleep_time_custom") {
+    const wake = parseSleepTime(text, now);
+    if (!wake) return response("Sleep", "Wake time must be in the future and within 14 hours.");
+    await startSleep({ db, user, wakeAt: wake, now });
+    await clearConversationState(db, user.id);
+    const duration = Math.round((wake.getTime() - now.getTime()) / 60_000);
+    return response("Sleep", `Locked in. I'll wake you at ${timeLabel(wake)} ⏰ (that's ${durationLabel(duration)} from now). I'm staying quiet till then. Set a real alarm too, I'm just a notification.`);
+  }
   if (state.type === "reminder_time_custom") {
     const parsed = parseCairoDateTime(text, now);
     if (!parsed) return {
@@ -3773,6 +3918,65 @@ async function getDefaultFocusDuration(db, userId, area, now) {
   return result && (Number(result.duration_minutes) === 25 || Number(result.duration_minutes) === 50)
     ? Number(result.duration_minutes)
     : 25;
+}
+
+function showSleepPrompt(now) {
+  return {
+    category: "Sleep",
+    title: "",
+    sections: [{ heading: "", lines: ["Alright Martino, time to power down. 🌙 When should I wake you?"] }],
+    actions: [[
+      { label: "6:00 AM", action: "sleep_time|06:00" },
+      { label: "7:00 AM", action: "sleep_time|07:00" },
+      { label: "8:00 AM", action: "sleep_time|08:00" },
+      { label: "9:00 AM", action: "sleep_time|09:00" }
+    ], [{ label: "Custom", action: "sleep_time|custom" }]]
+  };
+}
+
+async function handleDiveCommand({ db, user, intent, now }) {
+  const minutes = parseDiveDuration(intent.arguments);
+  if (!minutes) {
+    return {
+      category: "Dive",
+      title: "",
+      sections: [{ heading: "", lines: ["How long?"] }],
+      actions: [[
+        { label: "1 h", action: "dive_start|60" },
+        { label: "2 h", action: "dive_start|120" },
+        { label: "3 h", action: "dive_start|180" }
+      ]]
+    };
+  }
+  const until = await startDive({ db, user, minutes, now });
+  return {
+    category: "Dive",
+    title: "",
+    sections: [{ heading: "", lines: [`Bet. 🎧 I'm gone for ${durationLabel(minutes)}. I'll hit you at ${timeLabel(until)}.`] }],
+    actions: [[
+      { label: "I'm back", action: "back" },
+      { label: "+30 min", action: "dive_extend|30" }
+    ]]
+  };
+}
+
+async function updatePingsSetting(db, argumentsText, now) {
+  const value = String(argumentsText || "").trim().toLowerCase();
+  if (!["30", "60", "off"].includes(value)) return response("Pings", "Use /pings 30, /pings 60, or /pings off.");
+  await db.prepare(
+    `INSERT INTO settings (setting_key, setting_value, updated_at)
+     VALUES ('checkin_minutes', ?1, ?2)
+     ON CONFLICT(setting_key) DO UPDATE SET setting_value=excluded.setting_value, updated_at=excluded.updated_at`
+  ).bind(value === "off" ? "0" : value, now.toISOString()).run();
+  return response("Pings", value === "off" ? "Check-ins are off." : `Check-ins are set to every ${value} minutes.`);
+}
+
+async function pauseCompanion(db, user, argumentsText, now) {
+  const until = new Date(now.getTime() + 2 * 60 * 60_000);
+  await db.prepare(
+    `UPDATE companion_state SET paused_until=?1, updated_at=?2 WHERE user_id=?3`
+  ).bind(until.toISOString(), now.toISOString(), user.id).run();
+  return response("Paused", "Pulses are paused for 2 hours.");
 }
 
 async function handleUserReminderCommand({ db, user, intent, now }) {

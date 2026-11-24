@@ -38,6 +38,9 @@ const SUPPORTED_COMMANDS = new Set([
   "pulses",
   "vibe",
   "tone"
+  ,"pings",
+  "pause",
+  "back"
 ]);
 
 const DETERMINISTIC_TEXT_ROUTES = [

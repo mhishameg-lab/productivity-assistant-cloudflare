@@ -22,6 +22,7 @@ import { areaLabel, cairoTimeParts as formatCairoTimeParts, longDate, timeLabel,
 import { getDisplayName, say } from "./core/voice.js";
 import { processWorkPulses } from "./pulses.js";
 import { processUserReminders } from "./user-reminders.js";
+import { processCompanion } from "./companion.js";
 
 const MAX_FOLLOWUPS_PER_RUN = 5;
 const MAX_FOLLOWUP_AGE_MS = 30 * 60 * 1000;
@@ -186,6 +187,15 @@ export async function handleScheduledEvent(controller, env, ctx) {
     authorizedTelegramUserId: env.AUTHORIZED_TELEGRAM_USER_ID,
     enabled: env.USER_REMINDERS_ENABLED === "true"
   });
+  const companion = await processCompanion({
+    db: env.DB,
+    telegram,
+    now,
+    authorizedTelegramUserId: env.AUTHORIZED_TELEGRAM_USER_ID,
+    googleTasks,
+    googleCalendar,
+    enabled: env.COMPANION_ENABLED === "true"
+  });
   const rhythm = await processScheduledRhythm({
     db: env.DB,
     telegram,
@@ -229,7 +239,7 @@ export async function handleScheduledEvent(controller, env, ctx) {
     now,
     enabled: false
   });
-  return { focus, pulses, userReminders, rhythm, reports, escalations, calendarReminders };
+  return { focus, pulses, userReminders, companion, rhythm, reports, escalations, calendarReminders };
 }
 
 async function performTelegramWebhookCutover(env, now) {

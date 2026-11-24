@@ -35,6 +35,13 @@
 - Tests added: scheduled rhythm updated to the single 11:15 PM night wrap and legacy checkpoint compatibility removed.
 - Assumptions: Wake-time personal morning scheduling is completed by Stage 7 sleep sessions; until then morning uses 8:00 AM.
 
+## Stage 7: Companion mode
+
+- Status: done
+- Files touched: `migrations/0012_v4_stage7_companion.sql`, `src/companion.js`, `src/core/assistant.js`, `src/core/intent.js`, `src/scheduled.js`, `test/worker.test.js`
+- Tests added: dive duration formats including Arabic, sleep wake parsing, companion tables and scheduling output.
+- Assumptions: Full check-in backoff and wake re-pings remain limited to the Cron-safe implementation provided here; no external alarm or notification guarantee is implied.
+
 ## Stage 5: Mini App
 
 - Status: done
