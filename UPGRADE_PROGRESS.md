@@ -20,3 +20,10 @@
 - Files touched: `src/core/intent.js`, `src/core/assistant.js`, `src/channels/telegram-api.js`, `src/scheduled.js`, `test/worker.test.js`
 - Tests added: HQ-style aliases, Where I’m at text routing, task-stack formatting and priorities/dates.
 - Assumptions: Trello and Obsidian remain data-only and their old commands stay hidden; the full calm home will be polished further by later stages.
+
+## Stage 4: User reminders
+
+- Status: done
+- Files touched: `migrations/0011_v4_stage4_reminders.sql`, `src/user-reminders.js`, `src/core/assistant.js`, `src/scheduled.js`, `test/worker.test.js`
+- Tests added: reminder parser formats, relative time, future date/time, D1 pending reminder list.
+- Assumptions: Sleep hold is completed in Stage 7; Stage 4 reminders use the normal due flow until sleep mode exists.

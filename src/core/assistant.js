@@ -66,6 +66,11 @@ import {
   timeLabel
 } from "./format.js";
 import { getDisplayName, say } from "./voice.js";
+import {
+  createUserReminder,
+  listPendingUserReminders,
+  parseUserReminder
+} from "../user-reminders.js";
 
 export async function handleAssistantMessage({
   db,
@@ -96,6 +101,14 @@ export async function handleAssistantMessage({
     if (state) {
       return handleConversationText({
         db, user, message, state, googleTasks, googleCalendar, aiDailyPlanner, now
+      });
+    }
+    if (/^(?:remind me|in \d|tomorrow at|on .+ at|\d{1,2}\/\d{1,2})/i.test(intent.text.trim())) {
+      return handleUserReminderCommand({
+        db,
+        user,
+        intent: { arguments: intent.text.trim() },
+        now
       });
     }
     if (/^▶\s*Next$/i.test(intent.text.trim())) {
@@ -189,6 +202,9 @@ export async function handleAssistantMessage({
       return showInboxTriage({ db, googleGmail, emailFollowUpAnalyzer, now });
     case "pipeline":
       return showPipelineOverview();
+    case "remind":
+    case "reminders":
+      return handleUserReminderCommand({ db, user, intent, now });
     case "help":
       return {
         category: "Control panel",
@@ -297,6 +313,77 @@ async function handleAction({
   now
 }) {
   const identifier = intent.identifier;
+  const reminderTime = identifier.match(/^reminder_time\|(09:00|12:00|17:00|custom)$/);
+  if (reminderTime) {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "reminder_time") return response("Reminder", "That reminder has expired.");
+    if (reminderTime[1] === "custom") {
+      await setConversationState(db, user.id, { ...state, type: "reminder_time_custom" }, now.toISOString());
+      return {
+        category: "Reminder",
+        title: "",
+        sections: [{ heading: "", lines: ["Enter a date and time, for example 11/25/2026 3:00 PM."] }],
+        inputMode: "force_reply",
+        inputPlaceholder: "11/25/2026 3:00 PM"
+      };
+    }
+    const dateKey = cairoDateKey(now);
+    const due = new Date(cairoDateTimeToUtcForReminder(dateKey, reminderTime[1]));
+    if (due.getTime() <= now.getTime()) due.setUTCDate(due.getUTCDate() + 1);
+    await createUserReminder({
+      db, user, text: state.text, dueAtUtc: due.toISOString(), now: now.toISOString()
+    });
+    await clearConversationState(db, user.id);
+    return response("Reminder", `Got it. I'll remind you to “${state.text}” at ${timeLabel(due)}. ⏰`);
+  }
+  const reminderDone = identifier.match(/^reminder_done\|(REM-[A-Za-z0-9-]+)$/);
+  if (reminderDone) {
+    await db.prepare("UPDATE reminders SET status='done' WHERE id=?1 AND status IN ('sent','sending','snoozed')")
+      .bind(reminderDone[1]).run();
+    return response("Reminder", "Got it.");
+  }
+  const reminderCancel = identifier.match(/^reminder_cancel\|(REM-[A-Za-z0-9-]+)$/);
+  if (reminderCancel) {
+    await db.prepare("UPDATE reminders SET status='cancelled' WHERE id=?1")
+      .bind(reminderCancel[1]).run();
+    return response("Reminder", "Reminder cancelled.");
+  }
+  const reminderSnooze = identifier.match(/^reminder_snooze\|(REM-[A-Za-z0-9-]+)\|(15|60)$/);
+  if (reminderSnooze) {
+    const minutes = Number(reminderSnooze[2]);
+    const current = await db.prepare("SELECT remind_at_utc FROM reminders WHERE id=?1")
+      .bind(reminderSnooze[1]).first();
+    const due = new Date((current ? Date.parse(current.remind_at_utc) : now.getTime()) + minutes * 60_000);
+    await db.prepare(
+      `UPDATE reminders
+          SET remind_at_utc=?1, status='pending', snooze_count=snooze_count+1
+        WHERE id=?2`
+    ).bind(due.toISOString(), reminderSnooze[1]).run();
+    return response("Reminder", `Snoozed till ${timeLabel(due)}.`);
+  }
+  const reminderTask = identifier.match(/^reminder_task\|(REM-[A-Za-z0-9-]+)$/);
+  if (reminderTask) {
+    const reminder = await db.prepare("SELECT text FROM reminders WHERE id=?1")
+      .bind(reminderTask[1]).first();
+    if (!reminder) return response("Reminder", "That reminder is no longer available.");
+    if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+    return createCapturedTask({
+      db,
+      user,
+      state: {
+        requestId: `TASK-REM-${reminderTask[1]}`,
+        title: reminder.text,
+        area: "Other",
+        priority: "Medium",
+        dueDate: "",
+        doneTest: "Complete the reminder's requested action."
+      },
+      addToTop3: false,
+      googleTasks,
+      now,
+      clearConversation: false
+    });
+  }
   if (identifier === "home_more") {
     return showFullPlan({ db, user, googleTasks, googleCalendar, now });
   }
@@ -1662,6 +1749,23 @@ async function handleConversationText({
 }) {
   const text = String(message.message.text || "").trim();
   if (!text) return null;
+  if (state.type === "reminder_time_custom") {
+    const parsed = parseCairoDateTime(text, now);
+    if (!parsed) return {
+      category: "Reminder",
+      title: "",
+      sections: [{ heading: "", lines: ["Enter a date and time, for example 11/25/2026 3:00 PM."] }],
+      inputMode: "force_reply",
+      inputPlaceholder: "11/25/2026 3:00 PM"
+    };
+    const due = new Date(cairoDateTimeToUtcForReminder(parsed.dateKey, parsed.time));
+    if (due.getTime() <= now.getTime()) return response("Reminder", "That time has passed. Choose a future time.");
+    await createUserReminder({
+      db, user, text: state.text, dueAtUtc: due.toISOString(), now: now.toISOString()
+    });
+    await clearConversationState(db, user.id);
+    return response("Reminder", `Got it. I'll remind you to “${state.text}” at ${timeLabel(due)}. ⏰`);
+  }
   if (state.type === "available_time_duration") {
     if (!/^\d{1,3}$/.test(text)) {
       return forceReply(
@@ -3580,6 +3684,18 @@ async function createQuickCapturedTask({ db, user, googleTasks, capture, now }) 
   });
 }
 
+function cairoDateTimeToUtcForReminder(dateKey, time) {
+  const [hour, minute] = time.split(":").map(Number);
+  const utc = new Date(`${dateKey}T${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}:00Z`);
+  const offset = Number(cairoOffsetMinutes(utc));
+  return new Date(utc.getTime() - offset * 60_000).toISOString();
+}
+
+function cairoOffsetMinutes(date) {
+  const month = date.getUTCMonth();
+  return month >= 3 && month <= 9 ? 180 : 120;
+}
+
 function parseQuietDuration(text) {
   const match = String(text || "").trim().match(/^(\d+(?:\.\d+)?)h$/i);
   if (!match) return null;
@@ -3642,6 +3758,60 @@ async function getDefaultFocusDuration(db, userId, area, now) {
   return result && (Number(result.duration_minutes) === 25 || Number(result.duration_minutes) === 50)
     ? Number(result.duration_minutes)
     : 25;
+}
+
+async function handleUserReminderCommand({ db, user, intent, now }) {
+  const argumentsText = String(intent.arguments || "").trim();
+  if (!argumentsText) {
+    const result = await listPendingUserReminders(db, user.id, 8);
+    const lines = result.results.length
+      ? result.results.map(row => {
+          const status = row.status === "uncertain"
+            ? " · not sure it arrived"
+            : row.status === "missed"
+              ? " · missed"
+              : "";
+          return `⏰ ${shortDate(row.remind_at_utc)} · ${timeLabel(row.remind_at_utc)} · ${row.text}${status}`;
+        })
+      : ["No pending reminders."];
+    const actions = result.results.slice(0, 3).map(row => ({
+      label: "✖ Cancel",
+      action: `reminder_cancel|${row.id}`
+    }));
+    return {
+      category: "Reminders",
+      title: "",
+      sections: [{ heading: "", lines: [...lines, "How: /remind 5pm call Ahmed"] }],
+      actions: actions.length ? [actions] : []
+    };
+  }
+  const parsed = parseUserReminder(argumentsText, now);
+  if (!parsed) return response("Reminder", "Add reminder text and a time.");
+  if (parsed.pastTime) return response("Reminder", "That time has passed. Choose a future time.");
+  if (!parsed.dueAtUtc) {
+    await setConversationState(db, user.id, {
+      type: "reminder_time",
+      text: parsed.text
+    }, now.toISOString());
+    return {
+      category: "Reminder",
+      title: "",
+      sections: [{ heading: "", lines: ["When should I remind you?"] }],
+      actions: [[
+        { label: "9:00 AM", action: "reminder_time|09:00" },
+        { label: "12:00 PM", action: "reminder_time|12:00" },
+        { label: "5:00 PM", action: "reminder_time|17:00" }
+      ], [{ label: "Custom", action: "reminder_time|custom" }]]
+    };
+  }
+  await createUserReminder({
+    db,
+    user,
+    text: parsed.text,
+    dueAtUtc: parsed.dueAtUtc,
+    now: now.toISOString()
+  });
+  return response("Reminder", `Got it. I'll remind you to “${parsed.text}” at ${timeLabel(parsed.dueAtUtc)}. ⏰`);
 }
 
 async function updateToneSetting(db, argumentsText, now) {

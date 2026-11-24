@@ -65,6 +65,11 @@ import { say, selectToneTier } from "../src/core/voice.js";
 import { VOICE_BANK } from "../src/core/voice-bank.js";
 import { validateTelegramInitData, timingSafeEqual } from "../src/core/miniapp.js";
 import { formatTaskStack } from "../src/core/assistant.js";
+import {
+  createUserReminder,
+  listPendingUserReminders,
+  parseUserReminder
+} from "../src/user-reminders.js";
 
 class TestD1Database {
   constructor(database) {
@@ -124,6 +129,7 @@ async function createTestDatabase() {
   const phaseUpgradeMigration = await readFile(new URL("../migrations/0008_phase_upgrade.sql", import.meta.url), "utf8");
   const v4Stage1Migration = await readFile(new URL("../migrations/0009_v4_stage1.sql", import.meta.url), "utf8");
   const v4Stage2Migration = await readFile(new URL("../migrations/0010_v4_stage2.sql", import.meta.url), "utf8");
+  const v4Stage4Migration = await readFile(new URL("../migrations/0011_v4_stage4_reminders.sql", import.meta.url), "utf8");
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(initialSchema);
   sqlite.exec(focusSessionsMigration);
@@ -135,9 +141,34 @@ async function createTestDatabase() {
   sqlite.exec(phaseUpgradeMigration);
   sqlite.exec(v4Stage1Migration);
   sqlite.exec(v4Stage2Migration);
+  sqlite.exec(v4Stage4Migration);
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
+
+test("v4 Stage 4 reminder parser and D1 limits", async () => {
+  const now = new Date("2026-11-24T10:00:00.000Z");
+  assert.equal(parseUserReminder("remind me in 30 minutes to stretch", now).text, "stretch");
+  assert.equal(parseUserReminder("in 2 hours", now).text, "");
+  assert.equal(parseUserReminder("tomorrow at 9am", now).dueAtUtc !== null, true);
+  assert.equal(parseUserReminder("on Nov 25 at 3 PM", now).dueAtUtc !== null, true);
+  assert.equal(parseUserReminder("11/25 3pm", now).dueAtUtc !== null, true);
+  assert.equal(parseUserReminder("/remind 5pm call Ahmed", now).text, "call Ahmed");
+
+  const { sqlite, d1 } = await createTestDatabase();
+  const user = await getOrCreateChannelUser(d1, "telegram", "reminder-user", now.toISOString());
+  const created = await createUserReminder({
+    db: d1,
+    user,
+    text: "Call Ahmed",
+    dueAtUtc: "2026-11-24T15:00:00.000Z",
+    now: now.toISOString()
+  });
+  assert.equal(created.text, "Call Ahmed");
+  const pending = await listPendingUserReminders(d1, user.id, 8);
+  assert.equal(pending.results.length, 1);
+  sqlite.close();
+});
 
 test("v4 Stage 3 aliases, task stack, and calm layout", () => {
   assert.equal(resolveIntent(adaptTelegramUpdate({
@@ -3282,6 +3313,7 @@ test("focus scheduler expires stale sessions and stays disabled without both gat
     assert.deepEqual(scheduled, {
       focus: { sent: 1, considered: 1 },
       pulses: { sent: 0, skipped: 0, ignored: 0 },
+      userReminders: { sent: 0, snoozed: 0, missed: 0, uncertain: 0 },
       rhythm: { sent: 0, skipped: 0 },
       reports: { generated: 0, sent: 0, skipped: 0 },
       escalations: { sent: 0, skipped: 0, failed: 0 },
