@@ -27,3 +27,10 @@
 - Files touched: `migrations/0011_v4_stage4_reminders.sql`, `src/user-reminders.js`, `src/core/assistant.js`, `src/scheduled.js`, `test/worker.test.js`
 - Tests added: reminder parser formats, relative time, future date/time, D1 pending reminder list.
 - Assumptions: Sleep hold is completed in Stage 7; Stage 4 reminders use the normal due flow until sleep mode exists.
+
+## Stage 5: Mini App
+
+- Status: done
+- Files touched: `src/core/miniapp.js`, `src/index.js`, `src/core/assistant.js`, `test/worker.test.js`
+- Tests added: unauthorized Mini App initData is rejected.
+- Assumptions: Rest controls remain disabled until Stage 7; settings writes remain chat/D1-backed until their Stage 7 companion flow is complete.

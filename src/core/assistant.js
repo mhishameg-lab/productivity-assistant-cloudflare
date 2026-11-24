@@ -2303,7 +2303,7 @@ async function handleConversationText({
   );
 }
 
-async function createCapturedTask({
+export async function createCapturedTask({
   db,
   user,
   state,

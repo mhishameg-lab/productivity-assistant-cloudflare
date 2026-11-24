@@ -91,6 +91,26 @@ function areaCard(area, label) {
   return `<section class="card"><label>${label}</label><input name="${area}" placeholder="One outcome"><label><input type="checkbox" name="${area}_link"> Link a pending task</label><div class="chips"><span>Auto</span><span>25</span><span>50</span></div></section>`;
 }
 
+export function homePageHtml(name) {
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{margin:0;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#111);font-size:15px}main{padding:16px;padding-bottom:82px}.title{font-size:18px;font-weight:600;margin:0 0 12px}.card{background:var(--tg-theme-secondary-bg-color,#f5f5f5);border-radius:12px;padding:12px;margin:8px 0}.tabs{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--tg-theme-bg-color,#fff);border-top:1px solid rgba(127,127,127,.25)}.tabs a{flex:1;min-height:44px;text-align:center;padding:10px 2px;font-size:12px;color:inherit;text-decoration:none}.active{font-weight:600}</style></head><body><main><h1 class="title">📱 HQ · ${escapeHtml(name)}</h1><div id="data">Loading…</div></main><nav class="tabs"><a class="active" href="/app/home">📱 HQ</a><a href="/app/add">📝 Drop</a><a href="/app/plan">🗓 Plan</a><a href="/app/rest">😴 Rest</a><a href="/app/settings">⚙️ Settings</a></nav><script>
+const tg=window.Telegram&&Telegram.WebApp;tg&&tg.ready();fetch("/app/api/bootstrap",{headers:{"X-Telegram-Init-Data":tg?tg.initData:""}}).then(r=>r.json()).then(j=>{data.innerHTML=(j.outcomes||[]).map(o=>'<div class="card">'+(o.status==='Completed?'':'')+escape(o.area)+' · '+escape(o.outcome||'')+'</div>').join('')||(j.noPlan?'Your three outcomes for today aren’t set yet. Takes about a minute.':'')}).catch(()=>data.textContent='Could not load HQ.');
+function escape(v){return String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+</script></body></html>`;
+}
+
+export function restPageHtml(name) {
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{margin:0;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#111);font-size:15px}main{padding:16px;padding-bottom:82px}.title{font-size:18px;font-weight:600}.tabs{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--tg-theme-bg-color,#fff);border-top:1px solid rgba(127,127,127,.25)}.tabs a{flex:1;min-height:44px;text-align:center;padding:10px 2px;font-size:12px;color:inherit;text-decoration:none}.active{font-weight:600}button{min-height:44px;margin:4px}</style></head><body><main><h1 class="title">😴 Rest · ${escapeHtml(name)}</h1><p>Sleep and dive controls will be available after Companion mode is enabled.</p><h2 style="font-size:18px;font-weight:600">Sleep</h2><input type="time" id="wake"><button id="sleep" disabled>😴 Start sleep mode</button><h2 style="font-size:18px;font-weight:600">Dive</h2><button id="dive" disabled>🎧 1 h</button><button disabled>🎧 2 h</button><button disabled>🎧 3 h</button></main><nav class="tabs"><a href="/app/home">📱 HQ</a><a href="/app/add">📝 Drop</a><a href="/app/plan">🗓 Plan</a><a class="active" href="/app/rest">😴 Rest</a><a href="/app/settings">⚙️ Settings</a></nav></body></html>`;
+}
+
+export function settingsPageHtml(name) {
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><script src="https://telegram.org/js/telegram-web-app.js"></script><style>
+:root{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}body{margin:0;background:var(--tg-theme-bg-color,#fff);color:var(--tg-theme-text-color,#111);font-size:15px}main{padding:16px;padding-bottom:82px}.title{font-size:18px;font-weight:600}.tabs{position:fixed;bottom:0;left:0;right:0;display:flex;background:var(--tg-theme-bg-color,#fff);border-top:1px solid rgba(127,127,127,.25)}.tabs a{flex:1;min-height:44px;text-align:center;padding:10px 2px;font-size:12px;color:inherit;text-decoration:none}.active{font-weight:600}button{min-height:44px;margin:4px}</style></head><body><main><h1 class="title">⚙️ Settings · ${escapeHtml(name)}</h1><p>Check-ins: 30 min · 60 min · Off</p><p>Tone: Cheeky · Gentle</p><button>Pause 2 hours</button></main><nav class="tabs"><a href="/app/home">📱 HQ</a><a href="/app/add">📝 Drop</a><a href="/app/plan">🗓 Plan</a><a href="/app/rest">😴 Rest</a><a class="active" href="/app/settings">⚙️ Settings</a></nav><script>
+const tg=window.Telegram&&Telegram.WebApp;tg&&tg.ready();
+</script></body></html>`;
+}
+
 function escapeHtml(value) {
   return String(value || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

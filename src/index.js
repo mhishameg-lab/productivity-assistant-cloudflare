@@ -20,11 +20,15 @@ import {
   addTaskPageHtml,
   miniAppResponse,
   planPageHtml,
+  homePageHtml,
+  restPageHtml,
+  settingsPageHtml,
   validateTelegramInitData
 } from "./core/miniapp.js";
 import { cairoDateKey, shiftDateKey, shortDate } from "./core/format.js";
 import { upsertGoogleTaskMirror } from "./db/google-tasks-repository.js";
-import { createPlannedOutcomeTask } from "./core/assistant.js";
+import { createCapturedTask, createPlannedOutcomeTask } from "./core/assistant.js";
+import { createUserReminder } from "./user-reminders.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const jsonHeaders = { "Content-Type": "application/json; charset=utf-8" };
@@ -67,14 +71,27 @@ export default {
         return jsonResponse({ error: "Mini App is disabled." }, 404);
       }
       if (!env.DB) return jsonResponse({ error: "D1 database binding is not configured." }, 503);
-      if (request.method === "GET" && (url.pathname === "/app/plan" || url.pathname === "/app/add")) {
+      if (request.method === "GET" && [
+        "/app/home",
+        "/app/add",
+        "/app/plan",
+        "/app/rest",
+        "/app/settings"
+      ].includes(url.pathname)) {
         const nameRow = await env.DB.prepare(
           "SELECT setting_value FROM settings WHERE setting_key = 'display_name'"
         ).first();
         const name = nameRow && nameRow.setting_value ? nameRow.setting_value : "Mohamed";
-        return miniAppResponse(
-          url.pathname === "/app/plan" ? planPageHtml(name) : addTaskPageHtml(name)
-        );
+        const page = url.pathname === "/app/home"
+          ? homePageHtml(name)
+          : url.pathname === "/app/rest"
+            ? restPageHtml(name)
+            : url.pathname === "/app/settings"
+              ? settingsPageHtml(name)
+              : url.pathname === "/app/plan"
+                ? planPageHtml(name)
+                : addTaskPageHtml(name);
+        return miniAppResponse(page);
       }
       if (url.pathname === "/app/api/bootstrap" && request.method === "GET") {
         const authorized = await authorizeMiniAppRequest(request, env);
@@ -102,6 +119,16 @@ export default {
         const authorized = await authorizeMiniAppRequest(request, env);
         if (!authorized) return jsonResponse({ error: "Unauthorized" }, 401);
         return saveMiniAppTask(request, env);
+      }
+      if (url.pathname === "/app/api/reminder" && request.method === "POST") {
+        const authorized = await authorizeMiniAppRequest(request, env);
+        if (!authorized) return jsonResponse({ error: "Unauthorized" }, 401);
+        return saveMiniAppReminder(request, env);
+      }
+      if (url.pathname === "/app/api/complete" && request.method === "POST") {
+        const authorized = await authorizeMiniAppRequest(request, env);
+        if (!authorized) return jsonResponse({ error: "Unauthorized" }, 401);
+        return saveMiniAppCompletion(request, env);
       }
       return jsonResponse({ error: "Not found" }, 404);
     }
@@ -480,13 +507,114 @@ async function saveMiniAppTask(request, env) {
      VALUES (?1, ?2, 'Processing')`
   ).bind(body.requestId, new Date().toISOString()).run();
   const googleTasks = createGoogleTasksClient(env);
-  const notes = `Area: ${area}\nDone test: ${String(body.doneTest || "").trim()}`;
-  const created = await googleTasks.create(body.title.trim().slice(0, 500), notes, finalDue || null);
-  await upsertGoogleTaskMirror(env.DB, created, new Date().toISOString());
+  const user = await getOrCreateChannelUser(
+    env.DB,
+    "telegram",
+    String(env.AUTHORIZED_TELEGRAM_USER_ID),
+    new Date().toISOString()
+  );
+  const response = await createCapturedTask({
+    db: env.DB,
+    user,
+    state: {
+      requestId: body.requestId,
+      title: body.title.trim().slice(0, 500),
+      area,
+      priority,
+      dueDate: finalDue,
+      doneTest: String(body.doneTest || "").trim()
+    },
+    addToTop3: false,
+    googleTasks,
+    now: new Date(),
+    clearConversation: false
+  });
   await env.DB.prepare(
-    "UPDATE mini_app_requests SET google_task_id = ?1, status = 'Completed' WHERE id = ?2"
-  ).bind(created.id || null, body.requestId).run();
-  return jsonResponse({ ok: true, googleTaskId: created.id });
+    "UPDATE mini_app_requests SET status = 'Completed' WHERE id = ?1"
+  ).bind(body.requestId).run();
+  return jsonResponse({ ok: true, category: response.category });
+}
+
+async function saveMiniAppReminder(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON." }, 400);
+  }
+  if (!body || typeof body.requestId !== "string" || !body.text ||
+      typeof body.text !== "string" || !body.text.trim()) {
+    return jsonResponse({ error: "Request id and reminder text are required." }, 400);
+  }
+  const existing = await env.DB.prepare(
+    "SELECT id FROM mini_app_requests WHERE id = ?1"
+  ).bind(body.requestId).first();
+  if (existing) return jsonResponse({ ok: true, duplicate: true });
+  await env.DB.prepare(
+    `INSERT INTO mini_app_requests (id, created_at, status)
+     VALUES (?1, ?2, 'Processing')`
+  ).bind(body.requestId, new Date().toISOString()).run();
+  const now = new Date();
+  let dueAtUtc = "";
+  if (typeof body.dueAtUtc === "string" && body.dueAtUtc) {
+    dueAtUtc = body.dueAtUtc;
+  } else if (body.inMinutes) {
+    dueAtUtc = new Date(now.getTime() + Number(body.inMinutes) * 60_000).toISOString();
+  } else if (body.dueDate && body.dueTime) {
+    dueAtUtc = new Date(`${body.dueDate}T${body.dueTime}:00Z`).toISOString();
+  }
+  if (!dueAtUtc || Date.parse(dueAtUtc) <= now.getTime()) {
+    return jsonResponse({ error: "Choose a future reminder time." }, 400);
+  }
+  const user = await getOrCreateChannelUser(
+    env.DB,
+    "telegram",
+    String(env.AUTHORIZED_TELEGRAM_USER_ID),
+    now.toISOString()
+  );
+  await createUserReminder({
+    db: env.DB,
+    user,
+    text: body.text.trim().slice(0, 200),
+    dueAtUtc,
+    now: now.toISOString(),
+    requestId: body.requestId
+  });
+  await env.DB.prepare(
+    "UPDATE mini_app_requests SET status = 'Completed' WHERE id = ?1"
+  ).bind(body.requestId).run();
+  return jsonResponse({ ok: true });
+}
+
+async function saveMiniAppCompletion(request, env) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON." }, 400);
+  }
+  if (!body || typeof body.requestId !== "string" || !body.googleTaskId ||
+      typeof body.googleTaskId !== "string") {
+    return jsonResponse({ error: "Request id and Google Task id are required." }, 400);
+  }
+  const existing = await env.DB.prepare(
+    "SELECT google_task_id FROM mini_app_requests WHERE id = ?1"
+  ).bind(body.requestId).first();
+  if (existing) return jsonResponse({ ok: true, duplicate: true });
+  if (!hasGoogleTasksConfig(env)) {
+    return jsonResponse({ error: "Google Tasks is unavailable." }, 503);
+  }
+  await env.DB.prepare(
+    `INSERT INTO mini_app_requests (id, google_task_id, created_at, status)
+     VALUES (?1, ?2, ?3, 'Processing')`
+  ).bind(body.requestId, body.googleTaskId, new Date().toISOString()).run();
+  const googleTasks = createGoogleTasksClient(env);
+  const completed = await googleTasks.complete(body.googleTaskId);
+  await upsertGoogleTaskMirror(env.DB, completed, new Date().toISOString());
+  await env.DB.prepare(
+    "UPDATE mini_app_requests SET status = 'Completed' WHERE id = ?1"
+  ).bind(body.requestId).run();
+  return jsonResponse({ ok: true });
 }
 
 function jsonResponse(body, status = 200) {

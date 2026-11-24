@@ -146,6 +146,22 @@ async function createTestDatabase() {
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
 
+test("v4 Stage 5 Mini App rejects unauthorized initData", async () => {
+  const { d1 } = await createTestDatabase();
+  const response = await worker.fetch(
+    new Request("https://example.test/app/api/bootstrap", {
+      headers: { "X-Telegram-Init-Data": "bad-data" }
+    }),
+    {
+      DB: d1,
+      MINI_APP_ENABLED: "true",
+      TELEGRAM_BOT_TOKEN: "test-token",
+      AUTHORIZED_TELEGRAM_USER_ID: "123"
+    }
+  );
+  assert.equal(response.status, 401);
+});
+
 test("v4 Stage 4 reminder parser and D1 limits", async () => {
   const now = new Date("2026-11-24T10:00:00.000Z");
   assert.equal(parseUserReminder("remind me in 30 minutes to stretch", now).text, "stretch");
