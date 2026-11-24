@@ -32,6 +32,8 @@ PUBLIC_BASE_URL = ""
 MINI_APP_ENABLED = "false"
 WORK_PULSES_ENABLED = "false"
 HTML_EMAILS_ENABLED = "false"
+COMPANION_ENABLED = "false"
+USER_REMINDERS_ENABLED = "false"
 
 [triggers]
 crons = ["*/5 * * * *"]
@@ -67,6 +69,8 @@ PUBLIC_BASE_URL = "https://productivity-assistant-production.mhisham-eg.workers.
 MINI_APP_ENABLED = "false"
 WORK_PULSES_ENABLED = "false"
 HTML_EMAILS_ENABLED = "false"
+COMPANION_ENABLED = "false"
+USER_REMINDERS_ENABLED = "false"
 AI_ENABLED = "true"
 AI_FREE_PLAN_CONFIRMED = "true"
 AI_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast"

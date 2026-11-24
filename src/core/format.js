@@ -88,6 +88,33 @@ export function timeRange(start, end) {
   return `${timeLabel(start)} – ${timeLabel(end)}`;
 }
 
+export function durationLabel(minutes) {
+  const value = Number(minutes);
+  if (!Number.isFinite(value) || value < 0) throw new TypeError("Duration is invalid.");
+  const rounded = Math.floor(value);
+  const hours = Math.floor(rounded / 60);
+  const remainder = rounded % 60;
+  return hours
+    ? remainder ? `${hours} h ${remainder} min` : `${hours} h`
+    : `${remainder} min`;
+}
+
+export function greetingLine(name = "Martino", now = new Date()) {
+  const hour = Number(cairoTimeParts(now).hour);
+  const weekday = cairoTimeParts(now).weekday;
+  if (hour < 12) {
+    const morning = hour < 6
+      ? `🌙 Good morning, ${name}`
+      : "☀️";
+    return morning === "☀️"
+      ? `☀️ Good morning, ${name}`
+      : morning;
+  }
+  if (hour < 18) return `🌤 Good afternoon, ${name}`;
+  if (hour < 23) return `🌙 Good evening, ${name}`;
+  return `🌙 Hey ${name}`;
+}
+
 export function relativeLabel(minutes) {
   const value = Number(minutes);
   if (!Number.isFinite(value) || value < 0) throw new TypeError("Relative minutes are invalid.");

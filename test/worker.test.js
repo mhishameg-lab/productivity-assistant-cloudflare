@@ -57,7 +57,9 @@ import {
   parseDateInput,
   parseTimeInput,
   shortDate,
-  timeLabel
+  timeLabel,
+  durationLabel,
+  greetingLine
 } from "../src/core/format.js";
 import { say } from "../src/core/voice.js";
 import { validateTelegramInitData, timingSafeEqual } from "../src/core/miniapp.js";
@@ -118,6 +120,7 @@ async function createTestDatabase() {
   const aiRecommendationsMigration = await readFile(new URL("../migrations/0006_ai_recommendations.sql", import.meta.url), "utf8");
   const calendarRemindersMigration = await readFile(new URL("../migrations/0007_calendar_reminders.sql", import.meta.url), "utf8");
   const phaseUpgradeMigration = await readFile(new URL("../migrations/0008_phase_upgrade.sql", import.meta.url), "utf8");
+  const v4Stage1Migration = await readFile(new URL("../migrations/0009_v4_stage1.sql", import.meta.url), "utf8");
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(initialSchema);
   sqlite.exec(focusSessionsMigration);
@@ -127,9 +130,20 @@ async function createTestDatabase() {
   sqlite.exec(aiRecommendationsMigration);
   sqlite.exec(calendarRemindersMigration);
   sqlite.exec(phaseUpgradeMigration);
+  sqlite.exec(v4Stage1Migration);
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
+
+test("v4 Stage 1 seeds Martino and V4 display settings", async () => {
+  const { sqlite, d1 } = await createTestDatabase();
+  const name = sqlite.prepare("SELECT setting_value FROM settings WHERE setting_key = 'display_name'").get();
+  const tone = sqlite.prepare("SELECT setting_value FROM settings WHERE setting_key = 'tone'").get();
+  assert.equal(name.setting_value, "Martino");
+  assert.equal(tone.setting_value, "cheeky");
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM settings WHERE setting_key LIKE 'area_%_hint'").get().count, 3);
+  sqlite.close();
+});
 
 test("Phase 1 formatter covers noon, midnight, US dates, and stable voice variants", () => {
   const noon = new Date("2026-11-23T10:00:00.000Z");
@@ -138,6 +152,9 @@ test("Phase 1 formatter covers noon, midnight, US dates, and stable voice varian
   assert.equal(longDate("2026-11-23"), "Monday, November 23, 2026");
   assert.equal(timeLabel(noon), "12:00 PM");
   assert.equal(timeLabel(midnight), "12:00 AM");
+  assert.equal(durationLabel(465), "7 h 45 min");
+  assert.equal(durationLabel(60), "1 h");
+  assert.match(greetingLine("Martino", new Date("2026-11-24T06:00:00.000Z")), /☀️ Good morning, Martino/);
   assert.equal(parseTimeInput("2:30 PM"), "14:30");
   assert.equal(parseTimeInput("2pm"), "14:00");
   assert.equal(parseTimeInput("14:30"), "14:30");

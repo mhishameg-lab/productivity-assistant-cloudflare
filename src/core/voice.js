@@ -40,20 +40,21 @@ export function say(situation, context = {}) {
   const variants = VOICE_VARIANTS[situation] || [];
   if (!variants.length) return "";
   const date = cairoDateKey(context.now || new Date());
-  const index = stableHash(`${date}:${situation}`) % variants.length;
+  const counter = Number.isInteger(context.counter) ? context.counter : 0;
+  const index = stableHash(`${date}:${situation}:${counter}`) % variants.length;
   return fillTemplate(variants[index], context);
 }
 
 export async function getDisplayName(db) {
-  if (!db) return "Mohamed";
+  if (!db) return "Martino";
   const row = await db.prepare(
     "SELECT setting_value FROM settings WHERE setting_key = 'display_name'"
   ).bind().first();
-  return row && row.setting_value ? String(row.setting_value) : "Mohamed";
+  return row && row.setting_value ? String(row.setting_value) : "Martino";
 }
 
 export function greetingLine(dbName, now = new Date()) {
-  const name = dbName || "Mohamed";
+  const name = dbName || "Martino";
   const hour = Number(cairoTimeParts(now).hour);
   if (hour < 12) return `Good morning, ${name}.`;
   if (hour < 18) return `Good afternoon, ${name}.`;
