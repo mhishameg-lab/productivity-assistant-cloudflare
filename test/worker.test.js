@@ -2041,7 +2041,7 @@ test("scheduled morning briefing includes Calendar events when enabled", async (
       }
     },
     authorizedTelegramUserId: "calendar-rhythm-user",
-    now: new Date("2026-11-22T05:30:00.000Z"),
+    now: new Date("2026-11-22T06:00:00.000Z"),
     googleTasks: {
       async listAll() {
         return [{
@@ -2106,7 +2106,7 @@ test("scheduled morning briefing omits stale tasks when Google Tasks sync fails"
       }
     },
     authorizedTelegramUserId: "task-sync-failure-user",
-    now: new Date("2026-11-22T05:30:00.000Z"),
+    now: new Date("2026-11-22T06:00:00.000Z"),
     googleTasks: {
       async listAll() {
         throw new Error("Google Tasks unavailable");
@@ -3464,33 +3464,20 @@ test("daily rhythm schedules planning, records its final checkpoint, and dedupli
     db: d1,
     telegram,
     authorizedTelegramUserId: "rhythm-user",
-    now: new Date("2026-11-22T21:20:00.000Z")
+    now: new Date("2026-11-22T21:15:00.000Z")
   });
   assert.deepEqual(start, { sent: 1, skipped: 0 });
-  assert.match(sent[0].message.title, /Plan tomorrow/);
+  assert.match(sent[0].message.title, /Night wrap/);
   assert.equal(sent[0].chatId, "700");
-  assert.equal(
-    JSON.parse(sqlite.prepare("SELECT state_json FROM conversations WHERE user_id = ?1").get(user.id).state_json).type,
-    "next_day_done"
-  );
   assert.deepEqual(
     await processScheduledRhythm({
       db: d1,
       telegram,
       authorizedTelegramUserId: "rhythm-user",
-      now: new Date("2026-11-22T21:20:00.000Z")
+      now: new Date("2026-11-22T21:15:00.000Z")
     }),
     { sent: 0, skipped: 1 }
   );
-
-  const checkpoint = await processScheduledRhythm({
-    db: d1,
-    telegram,
-    authorizedTelegramUserId: "rhythm-user",
-    now: new Date("2026-11-22T22:00:00.000Z")
-  });
-  assert.deepEqual(checkpoint, { sent: 1, skipped: 0 });
-  assert.match(sent[1].message.title, /Planning confirmation/);
 
   const confirmation = await handleAssistantMessage({
     db: d1,
@@ -3519,10 +3506,10 @@ test("daily rhythm schedules planning, records its final checkpoint, and dedupli
       authorizedTelegramUserId: "rhythm-user",
       now: new Date("2026-11-22T22:20:00.000Z")
     }),
-    { sent: 0, skipped: 1 }
+    { sent: 0, skipped: 0 }
   );
-  assert.equal(sent.length, 2);
-  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM scheduled_job_runs").get().count, 2);
+  assert.equal(sent.length, 1);
+  assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM scheduled_job_runs").get().count, 1);
   sqlite.close();
 });
 

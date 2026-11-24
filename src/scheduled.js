@@ -358,14 +358,9 @@ export async function processScheduledRhythm({
   const date = `${parts.year}-${parts.month}-${parts.day}`;
   const time = `${parts.hour}:${parts.minute}`;
   const dueJob = {
-    "07:30": "morning",
+    "08:00": "morning",
     "14:15": "work_briefing",
-    "23:00": "shutdown",
-    "23:20": "next_day_planning",
-    "23:40": "planning_1",
-    "00:00": "planning_1",
-    "00:20": "planning_2",
-    "00:45": "planning_3"
+    "23:15": "night_wrap"
   }[time];
   if (!dueJob) return { sent: 0, skipped: 0 };
   const weekdayName = formatCairoTimeParts(now).weekday;
@@ -622,6 +617,36 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleTasks, 
     };
   }
 
+  if (dueJob === "night_wrap") {
+    const outcomes = await getNightOutcomes(db, date);
+    const name = await getDisplayName(db);
+    const completeCount = outcomes.filter(line => line.startsWith("✅")).length;
+    const dots = `${"▰".repeat(completeCount)}${"▱".repeat(Math.max(0, 3 - completeCount))}`;
+    return {
+      category: "Night wrap",
+      title: `🌙 Night wrap, ${name}`,
+      sections: [{
+        heading: "",
+        lines: [
+          ...outcomes,
+          `${dots} ${completeCount} of 3 done`,
+          "Confirm today?",
+          "Anything still in your head? 📝 Drop it before bed."
+        ]
+      }],
+      actions: [
+        [
+          { label: "✅ Locked in", action: `night_confirm|${date}` },
+          { label: "✏ Fix it", action: "weekly_start" }
+        ],
+        [
+          { label: "🗓 Plan tomorrow", action: "plan_next_day_now" },
+          { label: "😴 Zzz", action: "zzz" }
+        ]
+      ]
+    };
+  }
+
   if (dueJob === "work_briefing") {
     const runId = crypto.randomUUID();
     await setConversationState(db, target.userId, {
@@ -710,6 +735,22 @@ function formatCalendarErrorDetails(error) {
   const reason = error && error.googleApiReason ? ` ${error.googleApiReason}` : "";
   const status = error && error.status ? ` (HTTP ${Number(error.status)})` : "";
   return `Google Calendar${reason}${status}`;
+}
+
+async function getNightOutcomes(db, date) {
+  const result = await db.prepare(
+    `SELECT area, outcome, status
+       FROM daily_outcomes
+      WHERE outcome_date=?1
+      ORDER BY updated_at DESC, rowid DESC`
+  ).bind(date).all();
+  const latest = new Map();
+  for (const row of result.results) if (!latest.has(row.area)) latest.set(row.area, row);
+  return ["DEEP", "WORK", "LIFE"].map(area => {
+    const outcome = latest.get(area);
+    const done = outcome && outcome.status === "Completed";
+    return `${done ? "✅" : "⚪"} ${areaLabel(area)} ${outcome ? outcome.outcome : ""}`.trim();
+  });
 }
 
 async function getOutcomesForDate(db, date) {

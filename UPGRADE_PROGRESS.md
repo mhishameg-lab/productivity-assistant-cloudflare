@@ -28,6 +28,13 @@
 - Tests added: reminder parser formats, relative time, future date/time, D1 pending reminder list.
 - Assumptions: Sleep hold is completed in Stage 7; Stage 4 reminders use the normal due flow until sleep mode exists.
 
+## Stage 6: Night wrap and morning
+
+- Status: done
+- Files touched: `src/scheduled.js`, `src/core/assistant.js`, `test/worker.test.js`
+- Tests added: scheduled rhythm updated to the single 11:15 PM night wrap and legacy checkpoint compatibility removed.
+- Assumptions: Wake-time personal morning scheduling is completed by Stage 7 sleep sessions; until then morning uses 8:00 AM.
+
 ## Stage 5: Mini App
 
 - Status: done

@@ -313,6 +313,21 @@ async function handleAction({
   now
 }) {
   const identifier = intent.identifier;
+  const nightConfirm = identifier.match(/^night_confirm\|(\d{4}-\d{2}-\d{2})$/);
+  if (nightConfirm) {
+    const date = nightConfirm[1];
+    const completed = await db.prepare(
+      "SELECT COUNT(*) AS count FROM daily_outcomes WHERE outcome_date=?1 AND status='Completed'"
+    ).bind(date).first();
+    await db.prepare(
+      `INSERT INTO daily_reviews (
+         review_date, planning_completed, review_completed, observations
+       ) VALUES (?1, 1, 1, ?2)
+       ON CONFLICT(review_date) DO UPDATE SET
+         planning_completed=1, review_completed=1, observations=excluded.observations`
+    ).bind(date, Number(completed.count) ? "User-confirmed day." : "Fresh run tomorrow.").run();
+    return response("Night wrap", Number(completed.count) ? "Locked in. Solid day. 💪" : "Locked in. Tomorrow's a fresh run.");
+  }
   const reminderTime = identifier.match(/^reminder_time\|(09:00|12:00|17:00|custom)$/);
   if (reminderTime) {
     const state = await getConversationState(db, user.id, now.toISOString());
