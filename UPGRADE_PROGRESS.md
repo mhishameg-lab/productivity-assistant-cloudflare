@@ -28,6 +28,13 @@
 - Tests added: reminder parser formats, relative time, future date/time, D1 pending reminder list.
 - Assumptions: Sleep hold is completed in Stage 7; Stage 4 reminders use the normal due flow until sleep mode exists.
 
+## Stage 5: Mini App
+
+- Status: done
+- Files touched: `src/core/miniapp.js`, `src/index.js`, `src/core/assistant.js`, `test/worker.test.js`
+- Tests added: unauthorized Mini App initData is rejected.
+- Assumptions: Rest controls remain disabled until Stage 7; settings writes remain chat/D1-backed until their Stage 7 companion flow is complete.
+
 ## Stage 6: Night wrap and morning
 
 - Status: done
@@ -49,9 +56,10 @@
 - Tests added: schedule constants and pipeline/scheduler consistency.
 - Assumptions: Pipeline settings remain a read view while Mini App settings writes are completed in the existing chat settings routes.
 
-## Stage 5: Mini App
+## Stage 9: Polished emails
 
 - Status: done
-- Files touched: `src/core/miniapp.js`, `src/index.js`, `src/core/assistant.js`, `test/worker.test.js`
-- Tests added: unauthorized Mini App initData is rejected.
-- Assumptions: Rest controls remain disabled until Stage 7; settings writes remain chat/D1-backed until their Stage 7 companion flow is complete.
+- Files touched: `src/core/email.js`, `test/worker.test.js`, `scripts/preview-emails.js`, `README.md`
+- Tests added: multipart plain/HTML structure, RFC 2047 subject encoding, escaping and size guard.
+- Assumptions: Production email sending remains gated by `HTML_EMAILS_ENABLED=false`; no real or test email was sent.
+

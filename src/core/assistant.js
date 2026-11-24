@@ -2875,9 +2875,9 @@ async function createAvailableTimePlan({
     heading: "How this was built",
     lines: [
       aiUsed
-        ? "Workers AI ranked the pending Google Tasks; the remaining order uses due dates and task priority."
+        ? "The pending Google Tasks are ranked; the remaining order uses due dates and task priority."
         : aiUnavailable
-          ? "Workers AI was unavailable or at its usage limit; tasks are ordered deterministically by due date and priority."
+          ? "Task ranking is unavailable; tasks are ordered by due date and priority."
           : "Tasks are ordered deterministically by due date and priority.",
       "Calendar was checked for conflicts. This is advisory only: no Calendar events were created and no task status or due date changed."
     ]
@@ -3517,7 +3517,7 @@ async function showInboxTriage({
       })));
       followUps = await emailFollowUpAnalyzer(analyzedThreads);
       if (!followUps) {
-        analysisMessage = "Workers AI couldn't analyze these messages (no readable plain text, temporary service issue, or daily free-usage limit). No messages were changed.";
+        analysisMessage = "Email follow-up analysis is unavailable. No messages were changed.";
       }
     } catch (error) {
       await logSystemEvent(db, {
@@ -3531,7 +3531,7 @@ async function showInboxTriage({
       analysisMessage = "I couldn't safely analyze message contents. No messages were changed.";
     }
   } else {
-    analysisMessage = "Workers AI email analysis is disabled or unavailable. No messages were changed.";
+    analysisMessage = "Email follow-up analysis is unavailable. No messages were changed.";
   }
 
   const verifiedFollowUps = Array.isArray(followUps)
@@ -3574,12 +3574,12 @@ async function showInboxTriage({
   ];
   if (verifiedFollowUps.length) {
     sections.push({
-      heading: "Workers AI potential follow-ups (evidence checked against the message)",
+      heading: "Potential follow-ups",
       lines: followUpLines
     });
   } else if (followUps && followUps.length === 0) {
     sections.push({
-      heading: "Workers AI review",
+      heading: "Review",
       lines: ["No verifiable action request was found in the analyzed text. Review the messages yourself; this is not proof that no action is needed."]
     });
   }
@@ -3589,7 +3589,7 @@ async function showInboxTriage({
       "No messages were marked read or sent.",
       analysisMessage,
       verifiedFollowUps.length
-        ? "Workers AI suggestions are advisory. A task is added to Google Tasks only after you tap its button; no email is sent."
+        ? "Suggestions are optional. A task is added only after you tap its button."
         : ""
     ].filter(Boolean)
   });

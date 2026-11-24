@@ -52,6 +52,7 @@ import {
 import { createGoal, updateGoalKeyResult } from "../src/db/goal-repository.js";
 import { parseDiveDuration, parseSleepTime } from "../src/companion.js";
 import { SCHEDULE, scheduledJobForCairoTime } from "../src/core/schedule.js";
+import { buildMultipartAlternative, encodeRfc2047, escapeEmailHtml } from "../src/core/email.js";
 import {
   areaLabel,
   longDate,
@@ -149,6 +150,21 @@ async function createTestDatabase() {
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }
+
+test("v4 Stage 9 multipart email safety, encoding, and escaping", () => {
+  const mime = buildMultipartAlternative({
+    to: "martino@example.com",
+    subject: "Needs attention: HVAC <Test>",
+    text: "Plain text",
+    html: "<table><td>Safe &amp; sound</td></table>"
+  });
+  assert.match(mime, /multipart\/alternative/);
+  assert.match(mime, /text\/plain; charset=UTF-8/);
+  assert.match(mime, /text\/html; charset=UTF-8/);
+  assert.ok(mime.length < 90_000);
+  assert.equal(escapeEmailHtml("<b>&</b>"), "&lt;b&gt;&amp;&lt;/b&gt;");
+  assert.match(encodeRfc2047("Your week, Märtino"), /UTF-8\?B\?/);
+});
 
 test("v4 Stage 8 pipeline schedule constants match scheduler routes", () => {
   assert.equal(scheduledJobForCairoTime("08:00"), "morning");
@@ -1964,7 +1980,7 @@ test("variable availability planning checks Calendar and uses Workers AI without
   assert.deepEqual(plan.sections.find(section => section.heading === "Breaks").lines, [
     "16:50–17:00 · Break"
   ]);
-  assert.match(plan.sections.at(-1).lines[0], /Workers AI ranked/);
+  assert.match(plan.sections.at(-1).lines[0], /The pending Google Tasks are ranked/);
   assert.match(plan.sections.at(-1).lines[1], /no Calendar events were created/);
   assert.equal(aiCalls, 1);
   assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM calendar_blocks").get().count, 0);
@@ -2480,7 +2496,7 @@ test("/inbox uses metadata-only fallback when email analysis is unavailable", as
   assert.match(inbox.sections[0].lines[0], /Alex <alex@example\.test>/);
   assert.match(inbox.sections[0].lines[0], /Subject: Please review/);
   assert.match(inbox.sections[1].lines[0], /No messages were marked read or sent/);
-  assert.match(inbox.sections[1].lines[1], /analysis is disabled or unavailable/);
+  assert.match(inbox.sections[1].lines[1], /Email follow-up analysis is unavailable/);
 
   const disabled = await send(9411, null);
   assert.equal(disabled.title, "Read-only inbox access is disabled");
@@ -2888,7 +2904,7 @@ test("authorized /inbox request invokes Workers AI when all free-plan gates are 
     assert.deepEqual(await response.json(), { ok: true });
     assert.equal(aiCalls, 1);
     assert.match(aiPrompt, /Please send the revised contract by Thursday/);
-    assert.match(telegramMessages[0].text, /Workers AI potential follow-ups/);
+    assert.match(telegramMessages[0].text, /Potential follow-ups/);
     assert.match(telegramMessages[0].text, /send the revised contract/);
     assert.equal(
       telegramMessages[0].reply_markup.inline_keyboard[0][0].callback_data,

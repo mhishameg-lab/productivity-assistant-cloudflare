@@ -795,7 +795,52 @@ production email workflows to test them.
 - The original Apps Script deployment is deleted and is not a rollback
   option. The current completion target is Cloudflare Workers + D1.
 
-## 11. Telegram Upgrade (Phases 1–6)
+## 11. Telegram v4 Upgrade
+
+### V4 commands and gates
+
+The 12-command Telegram menu is: `/hq`, `/go`, `/drop`, `/wya`, `/plan`,
+`/zzz`, `/dive`, `/remind`, `/stack`, `/late`, `/mail`, and `/pipeline`.
+Old names remain aliases, including `/start`, `/today`, `/next`, `/focus`,
+`/addtask`, `/tasks`, `/overdue`, `/inbox`, `/weekly`, `/recap`, `/tone`,
+and `/checkins`.
+
+The new gates are:
+
+- `MINI_APP_ENABLED`
+- `COMPANION_ENABLED`
+- `USER_REMINDERS_ENABLED`
+- `HTML_EMAILS_ENABLED`
+- `PUBLIC_BASE_URL`
+
+All gates default to off in staging and remain off in production unless explicitly enabled.
+The Cron expression remains `*/5 * * * *`; scheduled work may arrive up to about five minutes late.
+
+### V4 user modes
+
+- `/hq` is the calm home; `/go` starts the next move.
+- `/wya` shows what is running, what finished, and the next step.
+- `/stack` shows the task stack with status emoji and High/Low priority markers.
+- `/remind` stores explicit reminders in D1, separate from Google Tasks and Calendar.
+- `/zzz` starts or confirms sleep mode.
+- `/dive` starts heads-down mode; `/back` ends it early.
+- `/vibe cheeky|gentle` changes the tone.
+- `/pings 30|60|off` changes Companion frequency.
+- `/pipeline` explains the daily rhythm and bot rules.
+
+### V4 data and schedules
+
+New additive migrations:
+
+- `0009_v4_stage1.sql`
+- `0010_v4_stage2.sql`
+- `0011_v4_stage4_reminders.sql`
+- `0012_v4_stage7_companion.sql`
+
+The D1 reminder table stores free-text reminders only. Sleep and dive state are
+stored in `sleep_sessions` and `companion_state`. Telegram remains a
+notification interface, not an alarm clock; notification sound and Do Not
+Disturb are controlled by the phone.
 
 ### Shared display and stored values
 

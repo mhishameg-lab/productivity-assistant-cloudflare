@@ -611,10 +611,10 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleTasks, 
       ],
       actions: [
         [
-          { label: "Start DEEP", action: "start_outcome|DEEP" },
-          { label: "Start WORK", action: "start_outcome|WORK" }
+          { label: "🌱 Growth", action: "start_outcome|DEEP" },
+          { label: "💼 Work", action: "start_outcome|WORK" }
         ],
-        [{ label: "Start LIFE", action: "start_outcome|LIFE" }],
+        [{ label: "🏠 Life", action: "start_outcome|LIFE" }],
         [
           { label: "Add something", action: "add_task" },
           { label: "Show full plan", action: "plan_my_day" }
