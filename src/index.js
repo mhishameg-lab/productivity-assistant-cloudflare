@@ -308,7 +308,14 @@ export default {
               result
             );
           } catch (error) {
-            await logFailure(env.DB, message.id, "Telegram message edit failed; sent a new message", error, env);
+            await logFailure(
+              env.DB,
+              message.id,
+              "Telegram message edit failed; sent a new message",
+              error,
+              env,
+              { severity: "WARN", eventType: "Message edit fallback" }
+            );
             deliveredMessage = await telegram.sendAssistantResponse(
               message.conversation.externalId,
               result
@@ -655,14 +662,21 @@ function hasGoogleTasksConfig(env) {
   );
 }
 
-async function logFailure(db, relatedRecordId, description, error, env) {
+async function logFailure(
+  db,
+  relatedRecordId,
+  description,
+  error,
+  env,
+  { severity = "ERROR", eventType = "Processing failure" } = {}
+) {
   const rawMessage = error && error.message ? String(error.message) : "";
   const errorMessage = redactSecrets(rawMessage, env).slice(0, 500);
   const event = {
     occurredAt: new Date().toISOString(),
-    severity: "ERROR",
+    severity,
     component: "Telegram webhook",
-    eventType: "Processing failure",
+    eventType,
     description,
     relatedRecordId,
     errorMessage: errorMessage || (error && error.name ? String(error.name) : "Error")

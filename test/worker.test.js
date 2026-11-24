@@ -3236,6 +3236,13 @@ test("explicit task-completion callback is acknowledged before Google Tasks is u
         completed: "2026-11-22T10:00:00.000Z"
       });
     }
+    if (target.includes("/editMessageText")) {
+      order.push("telegram-edit");
+      return Response.json({
+        ok: false,
+        description: "Bad Request: message to edit not found"
+      }, { status: 400 });
+    }
     if (target.includes("/sendMessage")) {
       order.push("telegram-response");
       return Response.json({ ok: true, result: { message_id: 902 } });
@@ -3275,9 +3282,17 @@ test("explicit task-completion callback is acknowledged before Google Tasks is u
 
     assert.equal(response.status, 200);
     assert.ok(order.indexOf("callback-ack") < order.indexOf("google-task-update"));
+    assert.ok(order.includes("telegram-edit"));
+    assert.ok(order.includes("telegram-response"));
     assert.equal(sqlite.prepare("SELECT status FROM tasks WHERE id = 'task-record'").get().status, "Completed");
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM task_history").get().count, 1);
     assert.equal(sqlite.prepare("SELECT COUNT(*) AS count FROM channel_actions").get().count, 1);
+    const fallbackLog = sqlite.prepare(
+      `SELECT severity, event_type FROM system_logs
+        WHERE description = 'Telegram message edit failed; sent a new message'`
+    ).get();
+    assert.equal(fallbackLog.severity, "WARN");
+    assert.equal(fallbackLog.event_type, "Message edit fallback");
   } finally {
     globalThis.fetch = originalFetch;
     sqlite.close();
