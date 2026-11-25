@@ -98,7 +98,8 @@ function buildTaskWrite(db, task, occurredAt, metadata, existing, taskId, status
               due_date = ?6,
               completed_at = ?7,
               updated_at = ?8,
-              postponement_count = postponement_count + ?10
+              postponement_count = postponement_count + ?10,
+              parent_google_task_id = ?11
         WHERE id = ?9`
     ).bind(
       String(task.title || ""),
@@ -110,15 +111,16 @@ function buildTaskWrite(db, task, occurredAt, metadata, existing, taskId, status
       status === "Completed" ? (task.completed || null) : null,
       occurredAt,
       taskId,
-      postponementIncrement
+      postponementIncrement,
+      task.parent ? String(task.parent) : null
     );
   }
   return db.prepare(
     `INSERT INTO tasks (
        id, google_task_id, title, description, status, priority, area,
        created_at, due_date, completed_at, updated_at, postponement_count,
-       last_reminder_at, escalation_status, notes
-     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, 0, NULL, 'None', '')`
+       last_reminder_at, escalation_status, notes, parent_google_task_id
+     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?8, 0, NULL, 'None', '', ?11)`
   ).bind(
     taskId,
     task.id,
@@ -129,7 +131,8 @@ function buildTaskWrite(db, task, occurredAt, metadata, existing, taskId, status
     metadata.area || null,
     occurredAt,
     dueDate,
-    status === "Completed" ? (task.completed || null) : null
+    status === "Completed" ? (task.completed || null) : null,
+    task.parent ? String(task.parent) : null
   );
 }
 

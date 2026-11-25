@@ -40,7 +40,8 @@ const SUPPORTED_COMMANDS = new Set([
   "tone"
   ,"pings",
   "pause",
-  "back"
+  "back",
+  "brainstorm"
 ]);
 
 const DETERMINISTIC_TEXT_ROUTES = [

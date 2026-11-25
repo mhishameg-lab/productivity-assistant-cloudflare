@@ -833,3 +833,86 @@ test("Deliverable 4: cleanup routes (/plan, /recap, start_task, pipeline_setting
 
   sqlite.close();
 });
+
+test("User UX upgrades: /start guide, exact-name edit prompt, task detail & rename, /remind chips, brainstorm 7am/10pm & vault", async () => {
+  const { sqlite, d1 } = await createDb();
+  const user = await getOrCreateChannelUser(d1, "telegram", "ux-user", NOW.toISOString());
+
+  // 1. /start gives guide (not task dump) + compact icon reply keyboard
+  const startRes = await handleAssistantMessage({
+    db: d1, user, message: textMsg("/start"), now: NOW
+  });
+  assert.match(responseText(startRes), /Here's how we roll/i);
+  assert.deepEqual(startRes.replyKeyboardRows, [
+    ["▶️", "📝", "⏰", "🎧"],
+    ["📋", "📥", "🧠", "📱"]
+  ]);
+
+  // 2. Typing exact name of existing task offers Edit vs Add new
+  let currentTitle = "Call Ahmed";
+  await upsertGoogleTaskMirror(d1, {
+    id: "gt-ahmed",
+    title: currentTitle,
+    status: "needsAction",
+    due: "2026-11-26T00:00:00.000Z"
+  }, NOW.toISOString(), { area: "WORK", priority: "Medium" });
+
+  const googleTasks = {
+    async listAll() {
+      return [{ id: "gt-ahmed", title: currentTitle, status: "needsAction", due: "2026-11-26T00:00:00.000Z" }];
+    },
+    async update(id, patch) {
+      currentTitle = patch.title;
+      return { id, title: currentTitle, status: "needsAction", due: "2026-11-26T00:00:00.000Z" };
+    }
+  };
+
+  const dupMatch = await handleAssistantMessage({
+    db: d1, user, message: textMsg("Call Ahmed"), googleTasks, now: NOW
+  });
+  assert.match(responseText(dupMatch), /already open/i);
+  assert.equal(dupMatch.actions[0][0].action, "task_open|gt-ahmed");
+
+  // 3. Tapping task_open shows detail card (Crushed it / Rename / Deadline) and rename updates Google Tasks
+  const detail = await handleAssistantMessage({
+    db: d1, user, message: tapAction("task_open|gt-ahmed"), googleTasks, now: NOW
+  });
+  assert.match(detail.actions[0][0].label, /Crushed it/);
+  assert.equal(detail.actions[0][1].action, "task_rename|gt-ahmed");
+
+  await handleAssistantMessage({
+    db: d1, user, message: tapAction("task_rename|gt-ahmed"), googleTasks, now: NOW
+  });
+  const renamed = await handleAssistantMessage({
+    db: d1, user, message: textMsg("Call Ahmed about Upflex"), googleTasks, now: NOW
+  });
+  assert.match(responseText(renamed), /Renamed to “Call Ahmed about Upflex”/);
+
+  // 4. /remind without args shows /dive-style quick chips
+  const remMenu = await handleAssistantMessage({
+    db: d1, user, message: textMsg("/remind"), now: NOW
+  });
+  assert.equal(remMenu.actions[0][0].action, "rem_quick|30m");
+
+  // 5. Brainstorm multi-message capture saves to brainstorms table on Save
+  await handleAssistantMessage({
+    db: d1, user, message: textMsg("🧠"), now: NOW
+  });
+  const part1 = await handleAssistantMessage({
+    db: d1, user, message: textMsg("Idea 1: HVAC calculator SaaS for Egypt contractors"), now: NOW
+  });
+  assert.match(responseText(part1), /Got part 1/);
+  const part2 = await handleAssistantMessage({
+    db: d1, user, message: textMsg("Idea 2: pair it with B2B SDR outreach"), now: NOW
+  });
+  assert.match(responseText(part2), /Got part 2/);
+  const savedBrn = await handleAssistantMessage({
+    db: d1, user, message: tapAction("brainstorm_save"), now: NOW
+  });
+  assert.match(responseText(savedBrn), /brainstorm vault/i);
+  const row = sqlite.prepare("SELECT content FROM brainstorms WHERE user_id = ?1").get(user.id);
+  assert.match(row.content, /HVAC calculator SaaS/);
+  assert.match(row.content, /B2B SDR outreach/);
+
+  sqlite.close();
+});

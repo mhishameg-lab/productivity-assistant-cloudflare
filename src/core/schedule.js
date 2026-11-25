@@ -14,8 +14,10 @@ export const SCHEDULE = Object.freeze({
 
 export function scheduledJobForCairoTime(time) {
   return ({
+    "07:00": "brainstorm_am",
     "08:00": "morning",
     "14:15": "work_briefing",
+    "22:00": "brainstorm_pm",
     "23:15": "night_wrap"
   })[time] || null;
 }

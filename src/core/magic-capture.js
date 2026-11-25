@@ -165,6 +165,8 @@ export async function routeMagicCapture({
   }
 
   if (!parsed || !parsed.items || !parsed.items.length) {
+    const existing = await findExactPendingTask(db, text, now);
+    if (existing) return renderExistingTaskChoice(db, user, existing, text, keywordMap, now);
     return presentUnknownCapture({ db, user, text, now });
   }
 
@@ -188,6 +190,8 @@ export async function routeMagicCapture({
 
   const item = parsed.items[0];
   if (item.confidence < 0.6 || item.intent === "unknown") {
+    const existing = await findExactPendingTask(db, text, now);
+    if (existing) return renderExistingTaskChoice(db, user, existing, text, keywordMap, now);
     return presentUnknownCapture({ db, user, text, now });
   }
 
@@ -222,6 +226,44 @@ export async function routeMagicCapture({
     default:
       return presentUnknownCapture({ db, user, text, now });
   }
+}
+
+async function findExactPendingTask(db, text, now) {
+  const norm = s => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const target = norm(text);
+  if (!target) return null;
+  const pending = await listPendingTaskPlanningCandidates(db, cairoDateKey(now), 50);
+  return pending.find(t => t.google_task_id && norm(t.title) === target) || null;
+}
+
+async function renderExistingTaskChoice(db, user, existing, rawText, keywordMap, now) {
+  const title = String(rawText || existing.title).trim().slice(0, 120);
+  const draft = await saveCaptureDraft(db, {
+    userId: user.id,
+    intent: "task",
+    payload: {
+      title,
+      description: null,
+      area: guessArea(title, keywordMap),
+      priority: "Medium",
+      dueDate: null,
+      time: null
+    },
+    now
+  });
+  return {
+    category: "Task match",
+    title: "",
+    sections: [{
+      heading: "",
+      lines: [`“${existing.title}” is already open. Edit it or add a new one?`]
+    }],
+    actions: [[
+      { label: "✏️ Edit it", action: `task_open|${existing.google_task_id}` },
+      { label: "➕ Add new", action: `cap_save|${draft.id}` },
+      { label: "✖", action: `cap_cancel|${draft.id}` }
+    ]]
+  };
 }
 
 async function presentUnknownCapture({ db, user, text, now }) {
@@ -472,19 +514,40 @@ async function handleCapturedTask({ db, user, item, keywordMap, now }) {
   const area = item.area || guessArea(title, keywordMap);
   const priority = item.priority || "Medium";
   const dueDate = item.due_date || null;
+
+  // If the user typed the exact name of an existing open task, offer Edit vs Add new.
+  const pending = await listPendingTaskPlanningCandidates(db, cairoDateKey(now), 50);
+  const norm = s => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
+  const exactMatch = pending.find(t => t.google_task_id && norm(t.title) === norm(title));
+
   const draft = await saveCaptureDraft(db, {
     userId: user.id,
     intent: "task",
     payload: {
       title,
       description: item.description || null,
-      dueDate,
-      time: item.time || null,
+      area,
       priority,
-      area
+      dueDate,
+      time: item.time || null
     },
     now
   });
+  if (exactMatch) {
+    return {
+      category: "Task match",
+      title: "",
+      sections: [{
+        heading: "",
+        lines: [`“${exactMatch.title}” is already open. Edit it or add a new one?`]
+      }],
+      actions: [[
+        { label: "✏️ Edit it", action: `task_open|${exactMatch.google_task_id}` },
+        { label: "➕ Add new", action: `cap_save|${draft.id}` },
+        { label: "✖", action: `cap_cancel|${draft.id}` }
+      ]]
+    };
+  }
   return renderTaskCard(draft);
 }
 

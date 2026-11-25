@@ -92,6 +92,7 @@ export async function handleAssistantMessage({
   conversationResponder = null,
   onBeforeAiCall = null,
   aiDailyPlanner = null,
+  aiFocusTip = null,
   emailFollowUpAnalyzer = null,
   userRemindersEnabled = true,
   companionEnabled = true,
@@ -143,7 +144,7 @@ export async function handleAssistantMessage({
   if (intent.type === "user_action") {
     return handleAction({
       db, user, message, intent, googleTasks, googleCalendar, googleGmail,
-      aiDailyPlanner, conversationResponder, onBeforeAiCall, userRemindersEnabled, companionEnabled, now
+      aiDailyPlanner, aiFocusTip, conversationResponder, onBeforeAiCall, userRemindersEnabled, companionEnabled, now
     });
   }
 
@@ -153,33 +154,57 @@ export async function handleAssistantMessage({
   if (intent.type === "unsupported_input") return null;
   if (intent.type === "user_message") {
     const trimmedText = intent.text.trim();
-    if (/^(?:▶\s*Next|▶️?\s*Go)$/i.test(trimmedText)) {
+    if (/^(?:▶\s*Next|▶️?\s*Go|▶️?)$/i.test(trimmedText)) {
       await clearConversationState(db, user.id);
       return beginFocusNow({ db, user, now });
     }
-    if (/^🗓\s*Plan$/i.test(trimmedText)) {
+    if (/^(?:🗓\s*Plan|🗓)$/i.test(trimmedText)) {
       await clearConversationState(db, user.id);
       return showPlanForDate({
         db, user, googleTasks, googleCalendar,
         date: cairoDateKey(now), title: "Plan today", now
       });
     }
-    if (/^(?:➕\s*Add|📝\s*Drop\s*it)$/i.test(trimmedText)) {
+    if (/^(?:➕\s*Add|📝\s*Drop\s*it|📝)$/i.test(trimmedText)) {
       return beginMagicDrop(db, user, now);
     }
-    if (/^(?:📋\s*Today|📱\s*HQ)$/i.test(trimmedText)) {
+    if (/^(?:📋\s*Today|📱\s*HQ|📱)$/i.test(trimmedText)) {
       await clearConversationState(db, user.id);
       return showCalmHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
     }
-    if (/^🧭\s*Where\s+I'?m\s+at$/i.test(trimmedText)) {
+    if (/^(?:🧭\s*Where\s+I'?m\s+at|🧭)$/i.test(trimmedText)) {
       await clearConversationState(db, user.id);
       return showWhereIAm({ db, user, now });
     }
-    if (/^😴\s*Zzz$/i.test(trimmedText)) {
+    if (/^(?:😴\s*Zzz|😴)$/i.test(trimmedText)) {
       await clearConversationState(db, user.id);
       return companionEnabled
         ? showSleepPrompt(now)
         : response("Rest mode unavailable", "Sleep and dive controls are paused right now.");
+    }
+    if (/^⏰$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return userRemindersEnabled
+        ? handleUserReminderCommand({ db, user, intent: { name: "remind", arguments: "" }, now })
+        : response("Reminders paused", "Reminder delivery is paused right now.");
+    }
+    if (/^🎧$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return companionEnabled
+        ? handleDiveCommand({ db, user, intent: { name: "dive", arguments: "" }, now })
+        : response("Rest mode unavailable", "Sleep and dive controls are paused right now.");
+    }
+    if (/^📋$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return showTasks({ db, googleTasks, now });
+    }
+    if (/^📥$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return showInboxTriage({ db, googleGmail, emailFollowUpAnalyzer, now, compact: true });
+    }
+    if (/^🧠$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return beginBrainstorm(db, user, "manual", now);
     }
     const state = await getConversationState(db, user.id, now.toISOString());
     if (state) {
@@ -277,6 +302,7 @@ export async function handleAssistantMessage({
     case "recap":
       return beginWeeklyReview({ db, user, now });
     case "start":
+      return showStartGuide(db);
     case "today":
       return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
     case "go":
@@ -307,10 +333,13 @@ export async function handleAssistantMessage({
     case "tasks":
       return showTasks({ db, googleTasks, now });
     case "late":
-      return showOverdueTasks({ db, googleTasks, now });
+      return showOverdueTasks({ db, googleTasks, now, detailMode: true });
     case "mail":
+      return showInboxTriage({ db, googleGmail, emailFollowUpAnalyzer, now, compact: true });
     case "inbox":
       return showInboxTriage({ db, googleGmail, emailFollowUpAnalyzer, now });
+    case "brainstorm":
+      return beginBrainstorm(db, user, "manual", now);
     case "pipeline":
       return showPipelineOverview();
     case "remind":
@@ -426,6 +455,7 @@ async function handleAction({
   googleCalendar,
   googleGmail,
   aiDailyPlanner,
+  aiFocusTip = null,
   conversationResponder = null,
   onBeforeAiCall = null,
   userRemindersEnabled = true,
@@ -729,8 +759,116 @@ async function handleAction({
   const aiPlan = identifier.match(/^ai_daily_plan\|(\d{4}-\d{2}-\d{2})$/);
   if (aiPlan) {
     return showAiDailyPrioritySuggestion({
-      db, user, googleTasks, aiDailyPlanner, date: aiPlan[1], now
+      db, user, googleTasks, aiDailyPlanner, aiFocusTip, date: aiPlan[1], now
     });
+  }
+  const taskOpenMatch = identifier.match(/^task_open\|([A-Za-z0-9_-]{1,120})$/);
+  if (taskOpenMatch) {
+    return showTaskDetail({ db, googleTasks, googleTaskId: taskOpenMatch[1], now });
+  }
+  const taskRenameMatch = identifier.match(/^task_rename\|([A-Za-z0-9_-]{1,120})$/);
+  if (taskRenameMatch) {
+    await setConversationState(db, user.id, {
+      type: "task_rename",
+      googleTaskId: taskRenameMatch[1]
+    }, now.toISOString());
+    return {
+      category: "Rename task",
+      title: "",
+      sections: [{ heading: "", lines: ["✏️ Type the new name:"] }],
+      inputMode: "force_reply",
+      inputPlaceholder: "New task name"
+    };
+  }
+  const taskDuePickMatch = identifier.match(/^task_due_pick\|([A-Za-z0-9_-]{1,120})$/);
+  if (taskDuePickMatch) {
+    const id = taskDuePickMatch[1];
+    const today = cairoDateKey(now);
+    const tomorrow = shiftDateKey(today, 1);
+    const nextWeek = shiftDateKey(today, 7);
+    return {
+      category: "Deadline",
+      title: "",
+      sections: [{ heading: "", lines: ["📅 Pick a new deadline:"] }],
+      actions: [[
+        { label: "🟡 Today", action: `task_due_set|${id}|${today}` },
+        { label: "🟢 Tmrw", action: `task_due_set|${id}|${tomorrow}` },
+        { label: "📆 +7d", action: `task_due_set|${id}|${nextWeek}` }
+      ], [
+        { label: "⬅ Back", action: `task_open|${id}` }
+      ]]
+    };
+  }
+  const taskDueSetMatch = identifier.match(/^task_due_set\|([A-Za-z0-9_-]{1,120})\|(\d{4}-\d{2}-\d{2})$/);
+  if (taskDueSetMatch) {
+    const [, id, dueDate] = taskDueSetMatch;
+    if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+    const updated = await googleTasks.reschedule(id, dueDate);
+    await upsertGoogleTaskMirror(db, updated, now.toISOString());
+    return showTaskDetail({ db, googleTasks, googleTaskId: id, now, note: `📅 Moved to ${shortDate(dueDate)}.` });
+  }
+  const mailPickMatch = identifier.match(/^mail_pick\|([A-Za-z0-9_-]{1,32})$/);
+  if (mailPickMatch) {
+    return showSingleEmailDetail({ db, googleGmail, emailFollowUpAnalyzer, threadId: mailPickMatch[1], now });
+  }
+  const remQuickMatch = identifier.match(/^rem_quick\|(30m|60m|120m|09:00|17:00|custom)$/);
+  if (remQuickMatch) {
+    if (!userRemindersEnabled) return response("Reminders paused", "Reminder delivery is paused right now.");
+    const choice = remQuickMatch[1];
+    if (choice === "custom") {
+      await setConversationState(db, user.id, { type: "reminder_custom_full" }, now.toISOString());
+      return {
+        category: "Reminder",
+        title: "",
+        sections: [{ heading: "", lines: ["⌨️ Type it naturally, like \"5pm call Ahmed\" or \"in 45m check oven\"."] }],
+        inputMode: "force_reply",
+        inputPlaceholder: "5pm call Ahmed"
+      };
+    }
+    let dueAtUtc;
+    if (choice.endsWith("m")) {
+      const mins = Number(choice.slice(0, -1));
+      dueAtUtc = new Date(now.getTime() + mins * 60_000).toISOString();
+    } else {
+      const parsed = parseUserReminder(`${choice} reminder`, now);
+      dueAtUtc = parsed && parsed.dueAtUtc ? parsed.dueAtUtc : new Date(now.getTime() + 60 * 60_000).toISOString();
+    }
+    await setConversationState(db, user.id, { type: "reminder_text", dueAtUtc }, now.toISOString());
+    return {
+      category: "Reminder",
+      title: "",
+      sections: [{ heading: "", lines: [`⏰ ${timeLabel(dueAtUtc)} — what should I ping you about?`] }],
+      inputMode: "force_reply",
+      inputPlaceholder: "Short reminder"
+    };
+  }
+  if (identifier === "brainstorm_keep") {
+    return {
+      category: "Brainstorm",
+      title: "",
+      sections: [{ heading: "", lines: ["🧠 Keep dropping thoughts — send your next message."] }],
+      inputMode: "force_reply",
+      inputPlaceholder: "Keep going..."
+    };
+  }
+  if (identifier === "brainstorm_save") {
+    const state = await getConversationState(db, user.id, now.toISOString());
+    if (!state || state.type !== "brainstorm_collect" || !(state.chunks || []).length) {
+      await clearConversationState(db, user.id);
+      return response("Brainstorm", "Nothing buffered to save.");
+    }
+    const content = state.chunks.join("\n\n");
+    const title = state.chunks[0].slice(0, 80);
+    await db.prepare(
+      `INSERT INTO brainstorms (id, user_id, title, content, source, created_at, updated_at)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)`
+    ).bind(`BRN-${crypto.randomUUID()}`, user.id, title, content, state.source || "manual", now.toISOString()).run();
+    await clearConversationState(db, user.id);
+    return response("Brainstorm saved", `🧠 Locked in (${state.chunks.length} part${state.chunks.length === 1 ? "" : "s"}). Saved to your brainstorm vault.`);
+  }
+  if (identifier === "brainstorm_cancel") {
+    await clearConversationState(db, user.id);
+    return response("Brainstorm", "Skipped for now. Hit 🧠 anytime.");
   }
   const aiDecision = identifier.match(/^ai_recommendation\|(AI-REC-[A-Za-z0-9-]{1,48})\|(accepted|rejected)$/);
   if (aiDecision) {
@@ -2154,6 +2292,48 @@ async function handleConversationText({
     return createOutcomeAndBeginSprint({ db, user, state, text, googleTasks, now });
   }
 
+  if (state.type === "task_rename") {
+    if (!text.trim() || text.length > 200) {
+      return response("Rename", "Keep the name under 200 characters.");
+    }
+    if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+    const updated = await googleTasks.update(state.googleTaskId, { title: text.trim() });
+    await upsertGoogleTaskMirror(db, updated, now.toISOString());
+    await clearConversationState(db, user.id);
+    return showTaskDetail({ db, googleTasks, googleTaskId: state.googleTaskId, now, note: `✏️ Renamed to “${text.trim()}”.` });
+  }
+
+  if (state.type === "reminder_custom_full") {
+    await clearConversationState(db, user.id);
+    return handleUserReminderCommand({ db, user, intent: { name: "remind", arguments: text }, now });
+  }
+
+  if (state.type === "brainstorm_collect") {
+    const trimmed = text.trim();
+    const chunks = Array.isArray(state.chunks) ? [...state.chunks] : [];
+    if (/^(?:done|save|use|finish)$/i.test(trimmed) && chunks.length) {
+      const content = chunks.join("\n\n");
+      await db.prepare(
+        `INSERT INTO brainstorms (id, user_id, title, content, source, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)`
+      ).bind(`BRN-${crypto.randomUUID()}`, user.id, chunks[0].slice(0, 80), content, state.source || "manual", now.toISOString()).run();
+      await clearConversationState(db, user.id);
+      return response("Brainstorm saved", `🧠 Locked in (${chunks.length} part${chunks.length === 1 ? "" : "s"}). Saved to your brainstorm vault.`);
+    }
+    chunks.push(trimmed);
+    await setConversationState(db, user.id, { ...state, chunks }, now.toISOString(), 7200);
+    return {
+      category: "Brainstorm",
+      title: "",
+      sections: [{ heading: "", lines: [`🧠 Got part ${chunks.length}. Keep going or save it?`] }],
+      actions: [[
+        { label: "➕ Keep going", action: "brainstorm_keep" },
+        { label: "💾 Save it", action: "brainstorm_save" },
+        { label: "✖", action: "brainstorm_cancel" }
+      ]]
+    };
+  }
+
   if (state.type === "focus_action") {
     if (text.length > 1000) {
       return response("Focus action too long", "Keep the next action under 1,000 characters and try again.");
@@ -3381,6 +3561,7 @@ async function showAiDailyPrioritySuggestion({
   user,
   googleTasks,
   aiDailyPlanner,
+  aiFocusTip = null,
   date,
   now
 }) {
@@ -3395,12 +3576,15 @@ async function showAiDailyPrioritySuggestion({
   }
   await syncTaskList({ db, googleTasks, now });
   const existing = await getDailyFocusRecommendation(db, user.id, date);
-  if (existing) return formatStoredAiDailyRecommendation(existing, date);
   const candidates = (await listPendingTaskPlanningCandidates(db, date)).slice(0, 12);
+  const goals = await listDailyGoalFocus(db, user.id, date, 3);
+  if (existing) {
+    const tip = aiFocusTip ? await aiFocusTip({ tasks: candidates, goals }).catch(() => null) : null;
+    return formatStoredAiDailyRecommendation(existing, date, tip);
+  }
   if (!candidates.length) {
     return response("No open tasks", "There are no pending Google Tasks to prioritize.");
   }
-  const goals = await listDailyGoalFocus(db, user.id, date, 3);
 
   let taskIds;
   try {
@@ -3435,10 +3619,11 @@ async function showAiDailyPrioritySuggestion({
     safeTaskIds,
     now.toISOString()
   );
-  return formatStoredAiDailyRecommendation(saved, date);
+  const tip = aiFocusTip ? await aiFocusTip({ tasks: candidates, goals }).catch(() => null) : null;
+  return formatStoredAiDailyRecommendation(saved, date, tip);
 }
 
-function formatStoredAiDailyRecommendation(recommendation, date) {
+function formatStoredAiDailyRecommendation(recommendation, date, creativeTip = null) {
   const selectedTasks = recommendation.tasks;
   const decision = recommendation.decision === "Pending"
     ? "No response recorded yet."
@@ -3448,13 +3633,16 @@ function formatStoredAiDailyRecommendation(recommendation, date) {
     title: "Suggested focus",
     sections: [{
       heading: "Review before acting",
-      lines: selectedTasks.length
-        ? selectedTasks.map((task, index) =>
-          `${index + 1}. ${task.title}\n${task.status === "Pending"
-            ? `Signal: ${formatTaskPriorityEvidence(task, date)}`
-            : `Current Google Tasks status: ${task.status}`}`
-        )
-        : ["Nothing picked. Use your normal plan to pick the next move."]
+      lines: [
+        ...(creativeTip ? [`💡 ${creativeTip}`, ""] : []),
+        ...(selectedTasks.length
+          ? selectedTasks.map((task, index) =>
+            `${index + 1}. ${task.title}\n${task.status === "Pending"
+              ? `Signal: ${formatTaskPriorityEvidence(task, date)}`
+              : `Current Google Tasks status: ${task.status}`}`
+          )
+          : ["Nothing picked. Use your normal plan to pick the next move."])
+      ]
     }, {
       heading: "",
       lines: [
@@ -3553,49 +3741,112 @@ async function showTasks({ db, googleTasks, now }) {
   const today = cairoDateKey(now);
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
   await syncTaskList({ db, googleTasks, now });
-  const tasks = await listPendingTaskMirrors(db, today, 8, 0);
+  const allPending = await db.prepare(
+    `SELECT id, google_task_id, title, priority, due_date, area, parent_google_task_id
+       FROM tasks
+      WHERE status = 'Pending'
+      ORDER BY
+        CASE WHEN due_date IS NOT NULL AND due_date < ?1 THEN 0
+             WHEN due_date = ?1 THEN 1
+             WHEN due_date IS NOT NULL THEN 2 ELSE 3 END,
+        due_date,
+        CASE priority WHEN 'High' THEN 0 WHEN 'Medium' THEN 1 ELSE 2 END,
+        title
+      LIMIT 30`
+  ).bind(today).all().then(r => r.results || []);
+
+  const subtasksByParent = new Map();
+  for (const t of allPending) {
+    if (t.parent_google_task_id) {
+      if (!subtasksByParent.has(t.parent_google_task_id)) subtasksByParent.set(t.parent_google_task_id, []);
+      subtasksByParent.get(t.parent_google_task_id).push(t);
+    }
+  }
+  const tasks = allPending.filter(t => !t.parent_google_task_id).slice(0, 8);
   if (!tasks.length) {
     return {
       category: "Task list",
       title: "Your open tasks",
-      sections: [{ heading: "", lines: ["There are no pending tasks in the synchronized task list."] }],
-      actions: [[{ label: "Back to home", action: "home" }]]
+      sections: [{ heading: "", lines: ["Clean slate! Nothing pending right now."] }],
+      actions: [[{ label: "📝 Drop one", action: "add_task" }, { label: "📱 HQ", action: "home" }]]
     };
   }
 
-  const groups = [
-    { title: "OVERDUE", predicate: task => task.due_date && task.due_date < today },
-    { title: "DUE TODAY", predicate: task => task.due_date === today },
-    { title: "UPCOMING", predicate: task => task.due_date && task.due_date > today },
-    { title: "NO DEADLINE", predicate: task => !task.due_date }
-  ];
-  const sections = [];
-  for (const group of groups) {
-    const rows = tasks.filter(group.predicate);
-    if (rows.length) {
-      sections.push({
-        heading: group.title,
-        lines: rows.map(task => `${task.title} — ${task.priority || "Medium"}`)
-      });
-    }
+  const circleIcon = t => (t.due_date && t.due_date < today ? "🔴" : t.due_date === today ? "🟡" : t.due_date ? "🟢" : "⚪");
+  const priIcon = t => (t.priority === "High" ? " 🔥" : t.priority === "Low" ? " 🧊" : "");
+  const lines = tasks.map((t, idx) => {
+    const subs = subtasksByParent.get(t.google_task_id) || [];
+    const subTag = subs.length ? ` · ↳ ${subs.length}` : "";
+    const dueTag = t.due_date ? ` · ${shortDate(t.due_date)}` : "";
+    return `${idx + 1}. ${circleIcon(t)} ${t.title}${priIcon(t)}${dueTag}${subTag}`;
+  });
+  const taskButtons = tasks.filter(t => t.google_task_id).slice(0, 6).map((t, idx) => ({
+    label: `${circleIcon(t)} ${idx + 1}. ${t.title.slice(0, 12)}`,
+    action: `task_open|${t.google_task_id}`
+  }));
+  const actions = [];
+  for (let i = 0; i < taskButtons.length; i += 2) {
+    actions.push(taskButtons.slice(i, i + 2));
   }
-  const actions = tasks.filter(task => task.google_task_id).slice(0, 5).map(task => ([{
-    label: `Done · ${task.title.slice(0, 30)}`,
-    action: `task_complete|${task.google_task_id}`
-  }]));
-  actions.push([{ label: "Back to home", action: "home" }]);
+  actions.push([{ label: "📱 HQ", action: "home" }]);
   return {
     category: "Task list",
-    title: "Your open tasks",
-    sections: [
-      { heading: "", lines: [`Showing up to ${tasks.length} pending tasks`] },
-      ...sections
-    ],
+    title: "📋 Open tasks (tap to inspect)",
+    sections: [{ heading: "", lines }],
     actions
   };
 }
 
-async function showOverdueTasks({ db, googleTasks, now }) {
+async function showTaskDetail({ db, googleTasks, googleTaskId, now, note = null }) {
+  const today = cairoDateKey(now);
+  const task = await db.prepare(
+    `SELECT id, google_task_id, title, priority, due_date, area, status
+       FROM tasks
+      WHERE google_task_id = ?1 LIMIT 1`
+  ).bind(googleTaskId).first();
+  if (!task) return showTasks({ db, googleTasks, now });
+  const subs = await db.prepare(
+    `SELECT google_task_id, title, due_date, priority
+       FROM tasks
+      WHERE parent_google_task_id = ?1 AND status = 'Pending'
+      ORDER BY due_date IS NULL, due_date, title
+      LIMIT 5`
+  ).bind(googleTaskId).all().then(r => r.results || []);
+  const circle = task.due_date && task.due_date < today ? "🔴" : task.due_date === today ? "🟡" : task.due_date ? "🟢" : "⚪";
+  const pri = task.priority === "High" ? " 🔥" : task.priority === "Low" ? " 🧊" : "";
+  const lines = [
+    ...(note ? [note] : []),
+    `${circle} ${task.title}${pri}`,
+    `📅 ${task.due_date ? shortDate(task.due_date) : "No deadline"} · ${task.priority || "Medium"}`
+  ];
+  if (subs.length) {
+    lines.push("", "↳ Subtasks:");
+    for (const s of subs) lines.push(`  ⚪ ${s.title}`);
+  }
+  const actions = [];
+  if (subs.length) {
+    actions.push(subs.slice(0, 2).map(s => ({
+      label: `↳ ${s.title.slice(0, 14)}`,
+      action: `task_open|${s.google_task_id}`
+    })));
+  }
+  actions.push([
+    { label: "✅ Crushed it", action: `task_complete|${task.google_task_id}` },
+    { label: "✏️ Rename", action: `task_rename|${task.google_task_id}` }
+  ]);
+  actions.push([
+    { label: "📅 Deadline", action: `task_due_pick|${task.google_task_id}` },
+    { label: "✖", action: "show_tasks" }
+  ]);
+  return {
+    category: "Task detail",
+    title: "",
+    sections: [{ heading: "", lines }],
+    actions
+  };
+}
+
+async function showOverdueTasks({ db, googleTasks, now, detailMode = false }) {
   const today = cairoDateKey(now);
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
   await syncTaskList({ db, googleTasks, now });
@@ -3606,23 +3857,28 @@ async function showOverdueTasks({ db, googleTasks, now }) {
       title: "No overdue tasks",
       sections: [{
         heading: "",
-        lines: ["Google Tasks currently has no pending tasks past their due date."]
+        lines: ["Clean! Nothing overdue right now. 🎉"]
       }],
-      actions: [[{ label: "Back to home", action: "home" }]]
+      actions: [[{ label: "📱 HQ", action: "home" }]]
     };
   }
-  const actions = tasks.filter(task => task.google_task_id).slice(0, 5).map(task => ([{
-    label: `Done · ${task.title.slice(0, 30)}`,
-    action: `task_complete|${task.google_task_id}`
-  }]));
-  actions.push([{ label: "Show open tasks", action: "show_tasks" }]);
+  const actions = detailMode
+    ? tasks.filter(t => t.google_task_id).slice(0, 4).map((t, idx) => ([{
+        label: `🔴 ${idx + 1}. ${t.title.slice(0, 18)}`,
+        action: `task_open|${t.google_task_id}`
+      }]))
+    : tasks.filter(task => task.google_task_id).slice(0, 5).map(task => ([{
+        label: `Done · ${task.title.slice(0, 30)}`,
+        action: `task_complete|${task.google_task_id}`
+      }]));
+  actions.push([{ label: "📋 Open tasks", action: "show_tasks" }]);
   return {
     category: "Overdue tasks",
     title: "Pending past their due date",
     sections: [{
       heading: `Showing up to ${tasks.length} overdue tasks`,
       lines: tasks.map(task =>
-        `${task.title} · due ${task.due_date} · ${task.priority || "Medium"} priority`
+        `🔴 ${task.title} · due ${task.due_date} · ${task.priority || "Medium"} priority`
       )
     }],
     actions
@@ -3633,7 +3889,8 @@ async function showInboxTriage({
   db,
   googleGmail,
   emailFollowUpAnalyzer,
-  now
+  now,
+  compact = false
 }) {
   if (!googleGmail) {
     return {
@@ -3736,6 +3993,30 @@ async function showInboxTriage({
     other: "A follow-up may be needed"
   };
   const threadById = new Map(threads.map(thread => [thread.threadId, thread]));
+  const followUpByThread = new Map(verifiedFollowUps.map(item => [item.threadId, item]));
+  if (compact || threads.length > 1) {
+    const summaryLines = threads.map((thread, idx) => {
+      const sender = String(thread.from || "").replace(/<[^>]+>/g, "").trim() || thread.from;
+      const fu = followUpByThread.get(thread.threadId);
+      const tag = fu ? ` · ⚡ ${fu.actionType}` : "";
+      return `📥 ${idx + 1}. ${truncate(sender, 24)} — ${truncate(thread.subject, 55)}${tag}`;
+    });
+    const pickButtons = threads.slice(0, 5).map((thread, idx) => ({
+      label: `📩 ${idx + 1}`,
+      action: `mail_pick|${thread.threadId}`
+    }));
+    const rows = [];
+    for (let i = 0; i < pickButtons.length; i += 3) rows.push(pickButtons.slice(i, i + 3));
+    return {
+      category: "Gmail inbox",
+      title: "📥 Unread mail summary",
+      sections: [{
+        heading: "Pick an email to make a follow-up task:",
+        lines: summaryLines
+      }],
+      actions: rows
+    };
+  }
   const actions = verifiedFollowUps.flatMap(item => [[
     { label: "Create follow-up task", action: `gmail_followup_task|${item.threadId}` },
     { label: "Not now", action: `gmail_followup_dismiss|${item.threadId}` }
@@ -4207,16 +4488,24 @@ async function handleUserReminderCommand({ db, user, intent, now }) {
               : "";
           return `⏰ ${shortDate(row.remind_at_utc)} · ${timeLabel(row.remind_at_utc)} · ${row.text}${status}`;
         })
-      : ["No pending reminders."];
-    const actions = result.results.slice(0, 3).map(row => ({
-      label: "✖ Cancel",
-      action: `reminder_cancel|${row.id}`
-    }));
+      : ["No pending pings. Pick a quick time or type it:"];
+    const actions = [
+      [
+        { label: "⏱ 30m", action: "rem_quick|30m" },
+        { label: "⏱ 1h", action: "rem_quick|60m" },
+        { label: "⏱ 2h", action: "rem_quick|120m" }
+      ],
+      [
+        { label: "🌅 9 AM", action: "rem_quick|09:00" },
+        { label: "🌆 5 PM", action: "rem_quick|17:00" },
+        { label: "⌨️ Custom", action: "rem_quick|custom" }
+      ]
+    ];
     return {
       category: "Reminders",
-      title: "",
-      sections: [{ heading: "", lines: [...lines, "How: /remind 5pm call Ahmed"] }],
-      actions: actions.length ? [actions] : []
+      title: "⏰ Quick reminders",
+      sections: [{ heading: "", lines }],
+      actions
     };
   }
   const parsed = parseUserReminder(argumentsText, now);
@@ -4361,11 +4650,75 @@ function response(category, text) {
     sections: [{ heading: "", lines: [text] }],
     actions: [],
     replyKeyboardRows: [
-      ["▶️ Go", "📝 Drop it"],
-      ["🧭 Where I'm at", "🗓 Plan"],
-      ["😴 Zzz", "📱 HQ"]
+      ["▶️", "📝", "⏰", "🎧"],
+      ["📋", "📥", "🧠", "📱"]
     ]
   };
+}
+
+async function showStartGuide(db) {
+  const name = await getDisplayName(db);
+  return {
+    category: "Start",
+    title: `Yo ${name}! 👋 Here's how we roll:`,
+    sections: [{
+      heading: "",
+      lines: [
+        "📝 Just text me naturally — \"call Ahmed tomorrow 5pm\" or \"remind me in 30m\" and tap once.",
+        "💬 Ask anything about your day — \"what's next?\" or \"do I have overdue tasks?\"",
+        "🧠 Brainstorm — I'll ping you at 7 AM & 10 PM to dump ideas, or tap 🧠 anytime.",
+        "⚡ Quick bar below: ▶️ Go · 📝 Drop · ⏰ Ping · 🎧 Dive · 📋 Tasks · 📥 Mail · 🧠 Ideas · 📱 HQ"
+      ]
+    }],
+    actions: [],
+    replyKeyboardRows: [
+      ["▶️", "📝", "⏰", "🎧"],
+      ["📋", "📥", "🧠", "📱"]
+    ]
+  };
+}
+
+async function beginBrainstorm(db, user, source, now) {
+  const name = await getDisplayName(db);
+  await setConversationState(db, user.id, {
+    type: "brainstorm_collect",
+    chunks: [],
+    source
+  }, now.toISOString(), 7200);
+  return {
+    category: "Brainstorm",
+    title: "🧠 Brainstorm mode",
+    sections: [{
+      heading: "",
+      lines: [`Drop whatever's on your mind, ${name} — business, HVAC, code, sales. Send one or more messages, then tap Save.`]
+    }],
+    actions: [[{ label: "✖ Skip", action: "brainstorm_cancel" }]]
+  };
+}
+
+async function showSingleEmailDetail({ db, googleGmail, emailFollowUpAnalyzer, threadId, now }) {
+  if (!googleGmail) return response("Gmail", "Gmail is disabled right now.");
+  try {
+    const thread = await googleGmail.getThreadSummary(threadId);
+    const sender = String(thread.from || "").replace(/<[^>]+>/g, "").trim() || thread.from;
+    return {
+      category: "Gmail",
+      title: `📩 ${truncate(thread.subject, 80)}`,
+      sections: [{
+        heading: "",
+        lines: [
+          `From: ${sender}`,
+          `Received: ${formatCairoDateTime(thread.receivedAt)}`
+        ]
+      }],
+      actions: [[
+        { label: "📝 Make task", action: `gmail_followup_task|${thread.threadId}` },
+        { label: "🗑 Skip", action: `gmail_followup_dismiss|${thread.threadId}` }
+      ]]
+    };
+  } catch {
+    return response("Gmail", "Couldn't load that email right now.");
+  }
 }
 
 async function syncTaskList({ db, googleTasks, now }) {

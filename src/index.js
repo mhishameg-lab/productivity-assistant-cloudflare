@@ -18,7 +18,7 @@ import { createGoogleTasksClient } from "./integrations/google-tasks.js";
 import { classifyNaturalLanguageIntent } from "./ai/intent-classifier.js";
 import { parseWithWorkersAi } from "./ai/capture-parser.js";
 import { generateConversationalReply } from "./ai/conversation-responder.js";
-import { prioritizeDailyTasks } from "./ai/daily-prioritizer.js";
+import { generateCreativeFocusTip, prioritizeDailyTasks } from "./ai/daily-prioritizer.js";
 import { analyzeEmailFollowUps } from "./ai/email-followups.js";
 import { handleScheduledEvent } from "./scheduled.js";
 import {
@@ -297,6 +297,17 @@ export default {
             dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
           })
         : null;
+      const aiFocusTip = aiEnabled
+        ? ({ tasks, goals }) => generateCreativeFocusTip({
+            db: env.DB,
+            ai: env.AI,
+            tasks,
+            goals,
+            now,
+            model: env.AI_MODEL || undefined,
+            dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
+          })
+        : null;
       const emailFollowUpAnalyzer =
         aiEnabled &&
         googleGmail &&
@@ -322,6 +333,7 @@ export default {
         conversationResponder,
         onBeforeAiCall,
         aiDailyPlanner,
+        aiFocusTip,
         emailFollowUpAnalyzer,
         userRemindersEnabled: env.USER_REMINDERS_ENABLED === "true",
         companionEnabled: env.COMPANION_ENABLED === "true",

@@ -138,3 +138,54 @@ function parseTaskIds(result, candidates) {
   }
   return value.taskIds;
 }
+
+/**
+ * Generate a short creative focus insight tailored to Martino's interests
+ * (programming, HVAC engineering, sales, and business) based on his real pending tasks.
+ */
+export async function generateCreativeFocusTip({
+  db,
+  ai,
+  tasks = [],
+  goals = [],
+  now,
+  model = DEFAULT_MODEL,
+  dailyNeuronLimit = 5000
+}) {
+  if (!ai || typeof ai.run !== "function") return null;
+  const topTasks = sanitizeTasks(tasks).slice(0, 5);
+  if (!topTasks.length) return null;
+
+  const prompt = [
+    "You are Martino's sharp, street-smart friend & strategist.",
+    "Martino's interests: programming, HVAC engineering, B2B sales, and building businesses.",
+    "Given his real open tasks below, give ONE short, creative, high-value tip or angle (max 45 words, 1-2 sentences, max 1 emoji) to tackle his top task or connect it to his craft/business.",
+    "Never invent tasks or deadlines. Plain text only, no JSON.",
+    `Tasks: ${JSON.stringify(topTasks)}`,
+    goals.length ? `Goals: ${JSON.stringify(sanitizeGoals(goals))}` : ""
+  ].filter(Boolean).join("\n");
+
+  const promptBytes = new TextEncoder().encode(prompt).byteLength;
+  if (promptBytes > MAX_PROMPT_BYTES) return null;
+  const reservation = await reserveAiUsage({
+    db,
+    model,
+    inputBytes: promptBytes,
+    completionTokens: 90,
+    dailyNeuronLimit,
+    now
+  });
+  if (!reservation) return null;
+
+  try {
+    const result = await ai.run(model, { prompt, max_tokens: 90, temperature: 0.6 });
+    const raw = result && result.response !== undefined ? result.response : result;
+    if (typeof raw !== "string") return null;
+    const cleaned = raw.trim().replace(/^["“]|["”]$/g, "").replace(/\s+/g, " ").trim();
+    if (!cleaned || cleaned.length > 350) return null;
+    return cleaned;
+  } catch {
+    await recordAiFailure(db, reservation.usageDate, now);
+    return null;
+  }
+}

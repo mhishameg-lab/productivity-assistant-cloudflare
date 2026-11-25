@@ -146,6 +146,7 @@ async function createTestDatabase() {
   const v4Stage7Migration = await readFile(new URL("../migrations/0012_v4_stage7_companion.sql", import.meta.url), "utf8");
   const v5CaptureMigration = await readFile(new URL("../migrations/0013_v5_magic_capture.sql", import.meta.url), "utf8");
   const v5TimeMigration = await readFile(new URL("../migrations/0014_v5_time_reliability.sql", import.meta.url), "utf8");
+  const v5BrainstormMigration = await readFile(new URL("../migrations/0015_v5_brainstorms_and_subtasks.sql", import.meta.url), "utf8");
   const sqlite = new DatabaseSync(":memory:");
   sqlite.exec(initialSchema);
   sqlite.exec(focusSessionsMigration);
@@ -161,6 +162,7 @@ async function createTestDatabase() {
   sqlite.exec(v4Stage7Migration);
   sqlite.exec(v5CaptureMigration);
   sqlite.exec(v5TimeMigration);
+  sqlite.exec(v5BrainstormMigration);
   sqlite.exec("PRAGMA foreign_keys = ON;");
   return { sqlite, d1: new TestD1Database(sqlite) };
 }

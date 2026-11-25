@@ -523,6 +523,25 @@ async function findTelegramTarget(db, authorizedTelegramUserId) {
 }
 
 async function buildRhythmMessage({ db, target, dueJob, date, now, googleTasks, googleCalendar }) {
+  if (dueJob === "brainstorm_am" || dueJob === "brainstorm_pm") {
+    const name = await getDisplayName(db);
+    await setConversationState(db, target.userId, {
+      type: "brainstorm_collect",
+      chunks: [],
+      source: dueJob
+    }, now.toISOString(), 7200);
+    return {
+      category: "Brainstorm",
+      title: dueJob === "brainstorm_am" ? "🧠 Morning brainstorm" : "🧠 Night brainstorm",
+      sections: [{
+        heading: "",
+        lines: [`Yo ${name}, brainstorm time! Drop whatever's on your mind — business, HVAC, code, sales, anything. Send one or more messages, then tap Save when done.`]
+      }],
+      actions: [[
+        { label: "✖ Skip", action: "brainstorm_cancel" }
+      ]]
+    };
+  }
   if (dueJob === "morning") {
     const outcomes = await getOutcomesForDate(db, date);
     const name = await getDisplayName(db);

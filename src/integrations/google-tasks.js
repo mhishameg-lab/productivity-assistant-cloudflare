@@ -97,6 +97,24 @@ export function createGoogleTasksClient(env, fetchImpl = fetch, clock = () => Da
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(task)
       });
+    },
+
+    async update(taskId, patch = {}) {
+      const body = {};
+      if (typeof patch.title === "string" && patch.title.trim()) {
+        body.title = patch.title.trim();
+      }
+      if (typeof patch.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(patch.dueDate)) {
+        body.due = `${patch.dueDate}T00:00:00.000Z`;
+      }
+      return request(
+        `/lists/${encodeURIComponent(env.GOOGLE_TASK_LIST_ID)}/tasks/${encodeURIComponent(taskId)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }
+      );
     }
   };
 }
