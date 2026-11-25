@@ -23,7 +23,7 @@ import { getDisplayName, say } from "./core/voice.js";
 import { processWorkPulses } from "./pulses.js";
 import { processUserReminders } from "./user-reminders.js";
 import { processCompanion } from "./companion.js";
-import { scheduledJobForCairoTime } from "./core/schedule.js";
+import { scheduledJobForCairoTime, TELEGRAM_COMMANDS } from "./core/schedule.js";
 
 const MAX_FOLLOWUPS_PER_RUN = 5;
 const MAX_FOLLOWUP_AGE_MS = 30 * 60 * 1000;
@@ -143,7 +143,26 @@ export async function handleScheduledEvent(controller, env, ctx) {
   if (!env.TELEGRAM_BOT_TOKEN) throw new Error("Telegram Bot API secret is not configured for scheduled jobs.");
   const now = new Date(Number(controller.scheduledTime));
   if (Number.isNaN(now.getTime())) throw new TypeError("Scheduled event time is invalid.");
-  const telegram = createTelegramApi(env.TELEGRAM_BOT_TOKEN);
+  const baseTelegram = createTelegramApi(env.TELEGRAM_BOT_TOKEN);
+  let subrequestCount = 0;
+  const MAX_CRON_SUBREQUESTS = 38;
+  const telegram = {
+    ...baseTelegram,
+    call(method, payload) {
+      if (subrequestCount >= MAX_CRON_SUBREQUESTS) {
+        throw new Error("Free-plan cron subrequest budget reached; deferring remaining work to next run.");
+      }
+      subrequestCount++;
+      return baseTelegram.call(method, payload);
+    },
+    sendAssistantResponse(chatId, response) {
+      if (subrequestCount >= MAX_CRON_SUBREQUESTS) {
+        throw new Error("Free-plan cron subrequest budget reached; deferring remaining work to next run.");
+      }
+      subrequestCount++;
+      return baseTelegram.sendAssistantResponse(chatId, response);
+    }
+  };
   const googleCalendar = env.GOOGLE_CALENDAR_ENABLED === "true"
     ? createGoogleCalendarClient(env)
     : null;
@@ -285,27 +304,33 @@ async function performTelegramWebhookCutover(env, now) {
   if (!claim) return { skipped: true, reason: "Webhook cutover already completed or is in progress." };
 
   try {
-    const telegram = createTelegramApi(env.TELEGRAM_BOT_TOKEN);
+    const baseTelegram = createTelegramApi(env.TELEGRAM_BOT_TOKEN);
+  let subrequestCount = 0;
+  const MAX_CRON_SUBREQUESTS = 38;
+  const telegram = {
+    ...baseTelegram,
+    call(method, payload) {
+      if (subrequestCount >= MAX_CRON_SUBREQUESTS) {
+        throw new Error("Free-plan cron subrequest budget reached; deferring remaining work to next run.");
+      }
+      subrequestCount++;
+      return baseTelegram.call(method, payload);
+    },
+    sendAssistantResponse(chatId, response) {
+      if (subrequestCount >= MAX_CRON_SUBREQUESTS) {
+        throw new Error("Free-plan cron subrequest budget reached; deferring remaining work to next run.");
+      }
+      subrequestCount++;
+      return baseTelegram.sendAssistantResponse(chatId, response);
+    }
+  };
     await telegram.call("setWebhook", {
       url: env.TELEGRAM_WEBHOOK_URL,
       secret_token: env.TELEGRAM_WEBHOOK_SECRET,
       allowed_updates: ["message", "callback_query"],
       drop_pending_updates: false
     });
-    await telegram.setMyCommands([
-      { command: "hq", description: "📱 Your HQ: now, next, today" },
-      { command: "go", description: "▶️ Start the next move" },
-      { command: "drop", description: "📝 Drop a task or reminder" },
-      { command: "plan", description: "🗓 Plan your day" },
-      { command: "wya", description: "🧭 Where I'm at" },
-      { command: "stack", description: "📋 Your task stack" },
-      { command: "late", description: "🔴 Overdue tasks" },
-      { command: "mail", description: "📥 Unread mail" },
-      { command: "remind", description: "⏰ Set a reminder" },
-      { command: "brainstorm", description: "🧠 Brainstorm vault" },
-      { command: "zzz", description: "😴 Sleep mode & wake-up" },
-      { command: "dive", description: "🎧 Focus dive mode" }
-    ]);
+    await telegram.setMyCommands([...TELEGRAM_COMMANDS]);
     if (env.MINI_APP_ENABLED === "true" && env.PUBLIC_BASE_URL) {
       await telegram.setChatMenuButton({
         menu_button: {

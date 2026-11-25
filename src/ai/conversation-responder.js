@@ -28,7 +28,7 @@ const EXTRA_BANNED_SUBSTRINGS = Object.freeze([
 export async function buildConversationFacts({ db, user, googleCalendar = null, now = new Date() }) {
   const parts = cairoTimeParts(now);
   const date = parts.date;
-  const [name, pending, outcomesRows, remindersRows, turnsRows] = await Promise.all([
+  const [name, pending, outcomesRows, remindersRows, turnsRows, brainstormRows] = await Promise.all([
     getDisplayName(db),
     listPendingTaskPlanningCandidates(db, date, 15).catch(() => []),
     db.prepare(
@@ -39,7 +39,10 @@ export async function buildConversationFacts({ db, user, googleCalendar = null, 
     ).bind(user.id).all().then(r => r.results || []).catch(() => []),
     db.prepare(
       "SELECT role, text FROM chat_turns WHERE user_id = ?1 ORDER BY created_at DESC, rowid DESC LIMIT 6"
-    ).bind(user.id).all().then(r => (r.results || []).reverse()).catch(() => [])
+    ).bind(user.id).all().then(r => (r.results || []).reverse()).catch(() => []),
+    db.prepare(
+      "SELECT title, content, created_at FROM brainstorms WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 3"
+    ).bind(user.id).all().then(r => r.results || []).catch(() => [])
   ]);
 
   let calendarStatus = googleCalendar ? "ok" : "disabled";
@@ -95,6 +98,10 @@ export async function buildConversationFacts({ db, user, googleCalendar = null, 
     })),
     calendarStatus,
     calendarEvents,
+    recentBrainstorms: brainstormRows.map(b => ({
+      title: String(b.title || "").slice(0, 60),
+      snippet: String(b.content || "").slice(0, 140)
+    })),
     recentTurns: turnsRows
   };
 }
@@ -143,7 +150,8 @@ export async function generateConversationalReply({
     calendarEvents: (facts.calendarEvents || []).slice(0, 6).map(e => ({
       title: e.title,
       time: e.allDay ? "All day" : (e.startLabel && e.endLabel ? `${e.startLabel} - ${e.endLabel}` : e.startLabel)
-    }))
+    })),
+    recentBrainstorms: (facts.recentBrainstorms || []).slice(0, 2)
   };
 
   const turns = Array.isArray(recentTurns) ? recentTurns.slice(-3) : [];

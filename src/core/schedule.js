@@ -12,6 +12,21 @@ export const SCHEDULE = Object.freeze({
   shiftWindow: "3:00 PM–11:00 PM"
 });
 
+export const TELEGRAM_COMMANDS = Object.freeze([
+  { command: "hq", description: "📱 Your HQ: now, next, today" },
+  { command: "go", description: "▶️ Start the next move" },
+  { command: "drop", description: "📝 Drop a task or reminder" },
+  { command: "plan", description: "🗓 Plan your day" },
+  { command: "wya", description: "🧭 Where I'm at" },
+  { command: "stack", description: "📋 Your task stack" },
+  { command: "late", description: "🔴 Overdue tasks" },
+  { command: "mail", description: "📥 Unread mail" },
+  { command: "remind", description: "⏰ Set a reminder" },
+  { command: "brainstorm", description: "🧠 Brainstorm vault" },
+  { command: "zzz", description: "😴 Sleep mode & wake-up" },
+  { command: "dive", description: "🎧 Focus dive mode" }
+]);
+
 export function scheduledJobForCairoTime(time) {
   return ({
     "07:00": "brainstorm_am",

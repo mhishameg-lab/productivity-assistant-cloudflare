@@ -884,6 +884,20 @@ async function handleAction({
     await clearConversationState(db, user.id);
     return response("Brainstorm", "Skipped for now. Hit 🧠 anytime.");
   }
+  if (identifier === "brainstorm_list") {
+    const rows = await db.prepare(
+      "SELECT title, content, created_at FROM brainstorms WHERE user_id = ?1 ORDER BY created_at DESC LIMIT 5"
+    ).bind(user.id).all().then(r => r.results || []);
+    const lines = rows.length
+      ? rows.map((r, i) => `🧠 ${i + 1}. ${shortDate(r.created_at)} — ${truncate(r.content, 90)}`)
+      : ["No brainstorms saved yet. Send a message now to start one!"];
+    return {
+      category: "Brainstorm vault",
+      title: "🧠 Recent brainstorms",
+      sections: [{ heading: "", lines }],
+      actions: [[{ label: "📱 HQ", action: "home_back" }]]
+    };
+  }
   const aiDecision = identifier.match(/^ai_recommendation\|(AI-REC-[A-Za-z0-9-]{1,48})\|(accepted|rejected)$/);
   if (aiDecision) {
     const decision = aiDecision[2] === "accepted" ? "Accepted" : "Rejected";
@@ -4773,7 +4787,10 @@ async function beginBrainstorm(db, user, source, now) {
       heading: "",
       lines: [`Drop whatever's on your mind, ${name} — business, HVAC, code, sales. Send one or more messages, then tap Save.`]
     }],
-    actions: [[{ label: "✖ Skip", action: "brainstorm_cancel" }]]
+    actions: [[
+      { label: "📚 Vault", action: "brainstorm_list" },
+      { label: "✖ Skip", action: "brainstorm_cancel" }
+    ]]
   };
 }
 

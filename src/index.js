@@ -31,6 +31,7 @@ import {
   validateTelegramInitData
 } from "./core/miniapp.js";
 import { cairoDateKey, shiftDateKey, shortDate } from "./core/format.js";
+import { TELEGRAM_COMMANDS } from "./core/schedule.js";
 import { getDisplayName } from "./core/voice.js";
 import { upsertGoogleTaskMirror } from "./db/google-tasks-repository.js";
 import { createCapturedTask, createPlannedOutcomeTask } from "./core/assistant.js";
@@ -182,6 +183,9 @@ export default {
     const authorized = env.AUTHORIZED_TELEGRAM_USER_ID &&
       String(env.AUTHORIZED_TELEGRAM_USER_ID) === message.user.externalId;
     if (!authorized) {
+      if (message.message && message.message.command && message.message.command.name === "start") {
+        await telegram.setMyCommands([...TELEGRAM_COMMANDS]).catch(() => {});
+      }
       if (message.action) {
         await telegram.answerCallbackQuery(message.action.externalId, "This bot is private.");
       }
@@ -210,6 +214,9 @@ export default {
     if (!claim.claimed) return jsonResponse({ ok: true, duplicate: true });
 
     try {
+      if (message.message && message.message.command && message.message.command.name === "start") {
+        await telegram.setMyCommands([...TELEGRAM_COMMANDS]).catch(() => {});
+      }
       if (message.action) {
         try {
           await telegram.answerCallbackQuery(message.action.externalId, "Processing…");
@@ -370,6 +377,9 @@ export default {
             result
           );
         }
+      }
+      if (message.message && message.message.command && message.message.command.name === "start") {
+        await telegram.setMyCommands([...TELEGRAM_COMMANDS]).catch(() => {});
       }
       if (message.action) {
         await insertChannelAction(env.DB, {
