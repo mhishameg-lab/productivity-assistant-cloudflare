@@ -780,3 +780,56 @@ test("Deliverable 3: reminders sleep-hold, stale lease recovery, dive_end, wake 
 
   sqlite.close();
 });
+
+test("Deliverable 4: cleanup routes (/plan, /recap, start_task, pipeline_settings, tomorrow, /stack google_task_id)", async () => {
+  const { sqlite, d1 } = await createDb();
+  const user = await getOrCreateChannelUser(d1, "telegram", "cleanup-user", NOW.toISOString());
+
+  await upsertGoogleTaskMirror(d1, {
+    id: "gt-stack-1",
+    title: "Finish proposal",
+    status: "needsAction",
+    due: "2026-11-25T00:00:00.000Z"
+  }, NOW.toISOString(), { area: "WORK", priority: "High" });
+
+  const googleTasks = {
+    async listAll() {
+      return [{ id: "gt-stack-1", title: "Finish proposal", status: "needsAction", due: "2026-11-25T00:00:00.000Z" }];
+    }
+  };
+
+  // /plan and /recap commands route cleanly
+  const planRes = await handleAssistantMessage({
+    db: d1, user, message: textMsg("/plan"), googleTasks, now: NOW
+  });
+  assert.match(responseText(planRes), /Finish proposal|Today's plan/i);
+
+  const recapRes = await handleAssistantMessage({
+    db: d1, user, message: textMsg("/recap"), googleTasks, now: NOW
+  });
+  assert.match(responseText(recapRes), /Weekly|1\/5|completed/i);
+
+  // /stack uses google_task_id in task_complete action
+  const stackRes = await handleAssistantMessage({
+    db: d1, user, message: textMsg("/stack"), googleTasks, now: NOW
+  });
+  assert.equal(stackRes.actions[0][0].action, "task_complete|gt-stack-1");
+
+  // start_task|<id>, pipeline_settings, and tomorrow callbacks all resolve
+  const startRes = await handleAssistantMessage({
+    db: d1, user, message: tapAction("start_task|gt-stack-1"), googleTasks, now: NOW
+  });
+  assert.match(responseText(startRes), /Finish proposal/);
+
+  const settingsRes = await handleAssistantMessage({
+    db: d1, user, message: tapAction("pipeline_settings"), now: NOW
+  });
+  assert.match(responseText(settingsRes), /Martino/);
+
+  const tmrwRes = await handleAssistantMessage({
+    db: d1, user, message: tapAction("tomorrow"), googleTasks, now: NOW
+  });
+  assert.match(responseText(tmrwRes), /Tomorrow's plan/i);
+
+  sqlite.close();
+});

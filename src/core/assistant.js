@@ -264,6 +264,18 @@ export async function handleAssistantMessage({
   switch (intent.name) {
     case "hq":
       return showCalmHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
+    case "plan":
+      return showPlanForDate({
+        db,
+        user,
+        googleTasks,
+        googleCalendar,
+        date: cairoDateKey(now),
+        title: "Today's plan",
+        now
+      });
+    case "recap":
+      return beginWeeklyReview({ db, user, now });
     case "start":
     case "today":
       return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
@@ -640,6 +652,55 @@ async function handleAction({
   if (identifier === "wya") {
     return showWhereIAm({ db, user, now });
   }
+  if (identifier === "tomorrow") {
+    return showPlanForDate({
+      db,
+      user,
+      googleTasks,
+      googleCalendar,
+      date: shiftDateKey(cairoDateKey(now), 1),
+      title: "Tomorrow's plan",
+      now
+    });
+  }
+  const startTaskMatch = identifier.match(/^start_task\|(.+)$/);
+  if (startTaskMatch) {
+    const task = await db.prepare(
+      "SELECT id, title, area FROM tasks WHERE id = ?1 OR google_task_id = ?1 LIMIT 1"
+    ).bind(startTaskMatch[1]).first();
+    if (!task) return beginFocusNow({ db, user, now });
+    const area = ["DEEP", "WORK", "LIFE"].includes(task.area) ? task.area : "WORK";
+    return {
+      category: "Focus",
+      title: "",
+      sections: [{ heading: "", lines: [`Start “${task.title}”? Pick a sprint.`] }],
+      actions: [[
+        { label: "25 min", action: `focus_duration|${area}|25` },
+        { label: "50 min", action: `focus_duration|${area}|50` },
+        { label: "✖", action: "home" }
+      ]]
+    };
+  }
+  if (identifier === "pipeline_settings") {
+    const rows = await db.prepare(
+      "SELECT setting_key, setting_value FROM settings WHERE setting_key IN ('display_name','tone','checkin_minutes')"
+    ).all().then(r => r.results || []);
+    const map = Object.fromEntries(rows.map(r => [r.setting_key, r.setting_value]));
+    const pings = map.checkin_minutes === "0" ? "off" : `every ${map.checkin_minutes || "30"} min`;
+    return {
+      category: "Settings",
+      title: "",
+      sections: [{
+        heading: "",
+        lines: [
+          `Name: ${map.display_name || "Martino"}`,
+          `Vibe: ${map.tone || "cheeky"} (/vibe cheeky or gentle)`,
+          `Check-ins: ${pings} (/pings 30, 60, or off)`
+        ]
+      }],
+      actions: [[{ label: "⬅ Back", action: "pipeline_overview" }]]
+    };
+  }
   if (identifier === "pipeline_rhythm") {
     return {
       category: "Daily rhythm",
@@ -654,8 +715,7 @@ async function handleAction({
         "Reminders at the times you set.",
         "Calendar heads-up 15 minutes before events.",
         "Friday 6:00 PM weekly email.",
-        "First of month 6:00 PM monthly email.",
-        "Sunday 10:00 AM system status."
+        "First of month 6:00 PM monthly email."
       ] }],
       actions: [[{ label: "⬅ Back", action: "pipeline_overview" }]]
     };
@@ -3213,7 +3273,7 @@ export async function showTaskStack({ db, googleTasks, now }) {
   const tasks = await listPendingTaskMirrors(db, cairoDateKey(now), 8, 0);
   const completionRows = tasks.slice(0, 3).map(task => ({
     label: `✅ Done · ${task.title.slice(0, 22)}`,
-    action: `task_complete|${task.id}`
+    action: `task_complete|${task.google_task_id || task.id}`
   }));
   const actions = completionRows.length
     ? [completionRows, [{ label: "More", action: "show_tasks" }]]

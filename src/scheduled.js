@@ -681,50 +681,7 @@ async function buildRhythmMessage({ db, target, dueJob, date, now, googleTasks, 
     };
   }
 
-  if (dueJob === "shutdown") {
-    return {
-      category: "Daily shutdown",
-      title: `${timeLabel(now)} shutdown`,
-      sections: [{ heading: "", lines: [say("shutdown", { name: await getDisplayName(db), now })] }],
-      actions: [
-        [{ label: "Add an open loop", action: "add_task" }],
-        [{ label: "No open loops now", action: "shutdown_done" }]
-      ]
-    };
-  }
-
-  if (dueJob === "next_day_planning") {
-    const tomorrow = shiftDateKey(date, 1);
-    await setConversationState(db, target.userId, {
-      type: "next_day_done",
-      date: tomorrow,
-      reviewDate: date,
-      runId: crypto.randomUUID()
-    }, now.toISOString(), 7200);
-    return {
-      category: "Next-day planning",
-      title: "Plan tomorrow",
-      sections: [{ heading: "", lines: [say("plan_tomorrow_prompt", { now })] }],
-      inputMode: "force_reply",
-      inputPlaceholder: "One useful win"
-    };
-  }
-
-  return {
-    category: "Daily planning",
-    title: "Planning confirmation",
-    sections: [{
-      heading: "",
-      lines: [
-        "Your planning confirmation is the final checkpoint.",
-        `Confirm today’s plan for ${date}, or review it first.`
-      ]
-    }],
-    actions: [
-      [{ label: "Confirm today's plan", action: `plan_confirm_date|${date}` }],
-      [{ label: "Review today's plan", action: "plan_my_day" }]
-    ]
-  };
+  return null;
 }
 
 function formatGoalFocus(goal, date) {

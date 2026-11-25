@@ -31,6 +31,7 @@ import {
   validateTelegramInitData
 } from "./core/miniapp.js";
 import { cairoDateKey, shiftDateKey, shortDate } from "./core/format.js";
+import { getDisplayName } from "./core/voice.js";
 import { upsertGoogleTaskMirror } from "./db/google-tasks-repository.js";
 import { createCapturedTask, createPlannedOutcomeTask } from "./core/assistant.js";
 import { createUserReminder } from "./user-reminders.js";
@@ -83,7 +84,7 @@ export default {
         "/app/rest",
         "/app/settings"
       ].includes(url.pathname)) {
-        const name = "there";
+        const name = await getDisplayName(env.DB);
         const page = url.pathname === "/app/home"
           ? homePageHtml(name)
           : url.pathname === "/app/rest"

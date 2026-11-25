@@ -28,3 +28,11 @@
 - Updated `cloudflare/src/companion.js`: `dive_end` notification on dive expiry, 15-min spacing between wake re-pings using `VOICE_BANK`, settings-driven quiet hours (`00:30–08:00`), shift intervals (`checkin_minutes` / `checkin_minutes_shift`), `consecutive_ignored` backoff, daily cap with Cairo date rollover, and `selectToneTier` integration.
 - Fixed `fr|none|<reason>` (`companion_stuck`) and `/pause` upsert in `cloudflare/src/core/assistant.js`, and replaced hardcoded `"Mohamed"` in `cloudflare/src/scheduled.js` with `getDisplayName(env.DB)`.
 - Added Deliverable 3 tests in `cloudflare/test/golden-conversations.test.js`.
+
+## Deliverable 4: Cleanup
+- Wired missing `/plan` and `/recap` command routes in `cloudflare/src/core/assistant.js`.
+- Fixed `/stack` `task_complete` callback to emit `task.google_task_id` instead of D1 `task.id`.
+- Added handlers for `start_task|<id>`, `pipeline_settings`, and `tomorrow` in `assistant.js`, and removed the inaccurate Sunday status line from `pipeline_rhythm`.
+- Removed dead `shutdown`, `next_day_planning`, and `planning_confirm` branches from `buildScheduledRhythmPrompt` in `cloudflare/src/scheduled.js`.
+- Replaced hardcoded `"there"` in `cloudflare/src/index.js` Mini App HTML with `getDisplayName(env.DB)`.
+- Added Deliverable 4 verification tests in `cloudflare/test/golden-conversations.test.js`.
