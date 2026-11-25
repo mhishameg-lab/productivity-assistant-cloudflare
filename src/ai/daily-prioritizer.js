@@ -1,7 +1,7 @@
 import { recordAiFailure, reserveAiUsage } from "./usage-ledger.js";
 
 const DEFAULT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
-const MAX_PROMPT_BYTES = 3072;
+const MAX_PROMPT_BYTES = 4096;
 const MAX_COMPLETION_TOKENS = 64;
 const MAX_CANDIDATES = 12;
 
@@ -53,27 +53,35 @@ export async function prioritizeDailyTasks({
   if (!reservation) return null;
 
   try {
-    const result = await ai.run(model, {
-      prompt,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          type: "object",
-          properties: {
-            taskIds: {
-              type: "array",
-              items: { type: "string", enum: candidates.map(task => task.id) },
-              maxItems: 3,
-              uniqueItems: true
-            }
-          },
-          required: ["taskIds"],
-          additionalProperties: false
-        }
-      },
-      max_tokens: MAX_COMPLETION_TOKENS,
-      temperature: 0
-    });
+    let result;
+    try {
+      result = await ai.run(model, {
+        prompt,
+        response_format: {
+          type: "json_schema",
+          json_schema: {
+            type: "object",
+            properties: {
+              taskIds: {
+                type: "array",
+                items: { type: "string", enum: candidates.map(task => task.id) },
+                maxItems: 3
+              }
+            },
+            required: ["taskIds"],
+            additionalProperties: false
+          }
+        },
+        max_tokens: MAX_COMPLETION_TOKENS,
+        temperature: 0
+      });
+    } catch {
+      result = await ai.run(model, {
+        prompt,
+        max_tokens: MAX_COMPLETION_TOKENS,
+        temperature: 0
+      });
+    }
     return parseTaskIds(result, candidates);
   } catch (error) {
     await recordAiFailure(db, reservation.usageDate, now);
@@ -88,10 +96,10 @@ function sanitizeTasks(tasks) {
     .slice(0, MAX_CANDIDATES)
     .map(task => ({
       id: String(task.id).slice(0, 80),
-      title: String(task.title).slice(0, 160),
+      title: String(task.title).slice(0, 100),
       dueDate: task.due_date || null,
       priority: ["High", "Medium", "Low"].includes(task.priority) ? task.priority : "Medium",
-      linkedGoal: task.linked_goal_title ? String(task.linked_goal_title).slice(0, 120) : null,
+      linkedGoal: task.linked_goal_title ? String(task.linked_goal_title).slice(0, 80) : null,
       postponements: Math.max(0, Number(task.postponement_count) || 0)
     }));
 }
@@ -107,10 +115,12 @@ function sanitizeGoals(goals) {
 }
 
 function parseTaskIds(result, candidates) {
-  let value = result && result.response;
+  let value = result && result.response !== undefined ? result.response : result;
   if (typeof value === "string") {
+    const cleaned = value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+    const objMatch = cleaned.match(/\{[\s\S]*\}/);
     try {
-      value = JSON.parse(value);
+      value = JSON.parse(objMatch ? objMatch[0] : cleaned);
     } catch {
       throw new Error("Workers AI returned invalid JSON for daily prioritization.");
     }

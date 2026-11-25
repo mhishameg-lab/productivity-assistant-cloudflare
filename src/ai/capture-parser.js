@@ -111,12 +111,21 @@ export async function parseWithWorkersAi({
   if (!reservation) return null;
 
   try {
-    const result = await ai.run(model, {
-      prompt,
-      response_format: RESPONSE_FORMAT,
-      max_tokens: MAX_COMPLETION_TOKENS,
-      temperature: 0.1
-    });
+    let result;
+    try {
+      result = await ai.run(model, {
+        prompt,
+        response_format: RESPONSE_FORMAT,
+        max_tokens: MAX_COMPLETION_TOKENS,
+        temperature: 0.1
+      });
+    } catch {
+      result = await ai.run(model, {
+        prompt,
+        max_tokens: MAX_COMPLETION_TOKENS,
+        temperature: 0.1
+      });
+    }
     return validateCaptureResponse(result, now);
   } catch (error) {
     await recordAiFailure(db, reservation.usageDate, now);

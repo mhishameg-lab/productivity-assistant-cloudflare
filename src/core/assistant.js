@@ -334,33 +334,33 @@ export async function handleAssistantMessage({
         sections: [{
           heading: "",
           lines: [
-            "Plan my day",
-            "Review overdue tasks",
-            "Review unread inbox",
-            "Trello / Obsidian check-in",
-            "Review goals",
-            "Add a task",
-            "Focus now",
-            "Plan a free-time window",
-            "Review progress",
-            "Capture an idea",
-            "Weekly review",
-            "Monthly project decision",
-            "Settings",
-            "Shortcuts: /today · /available 90 · /tasks · /overdue · /inbox · /accountability · /goals · /goal · /addtask · /weekly · /monthly"
+            "Just text me anything naturally — I'll turn it into a task, reminder, calendar block, or answer.",
+            "Core: /hq · /go · /drop · /plan · /wya · /stack · /late · /mail",
+            "Focus & rest: /remind · /zzz · /dive · /back · /pings · /vibe",
+            "Goals & reviews: /goals · /goal · /weekly · /monthly · /pipeline"
           ]
         }],
         actions: [[
-          { label: "Add a task", action: "add_task" },
-          { label: "Show tasks", action: "show_tasks" }
+          { label: "📝 Drop a task", action: "add_task" },
+          { label: "📋 Show tasks", action: "show_tasks" }
         ], [
-          { label: "Review goals", action: "goals_show" },
-          { label: "Create a goal", action: "goal_new" }
+          { label: "🎯 Review goals", action: "goals_show" },
+          { label: "🎯 Set a goal", action: "goal_new" }
         ], [
           { label: "Weekly review", action: "weekly_start" },
           { label: "Monthly project", action: "monthly_project_review" }
         ]]
       };
+    case "progress":
+      return showWhereIAm({ db, user, now });
+    case "review":
+      return beginWeeklyReview({ db, user, now });
+    case "capture":
+      return beginMagicDrop(db, user, now);
+    case "habits":
+      return showManualAccountabilityCheckin({ db, now });
+    case "settings":
+      return showPipelineSettings(db);
     case "overdue":
       return showOverdueTasks({ db, googleTasks, now });
     case "accountability":
@@ -682,24 +682,7 @@ async function handleAction({
     };
   }
   if (identifier === "pipeline_settings") {
-    const rows = await db.prepare(
-      "SELECT setting_key, setting_value FROM settings WHERE setting_key IN ('display_name','tone','checkin_minutes')"
-    ).all().then(r => r.results || []);
-    const map = Object.fromEntries(rows.map(r => [r.setting_key, r.setting_value]));
-    const pings = map.checkin_minutes === "0" ? "off" : `every ${map.checkin_minutes || "30"} min`;
-    return {
-      category: "Settings",
-      title: "",
-      sections: [{
-        heading: "",
-        lines: [
-          `Name: ${map.display_name || "Martino"}`,
-          `Vibe: ${map.tone || "cheeky"} (/vibe cheeky or gentle)`,
-          `Check-ins: ${pings} (/pings 30, 60, or off)`
-        ]
-      }],
-      actions: [[{ label: "⬅ Back", action: "pipeline_overview" }]]
-    };
+    return showPipelineSettings(db);
   }
   if (identifier === "pipeline_rhythm") {
     return {
@@ -1200,12 +1183,20 @@ async function handleAction({
         date,
         area
       }, now.toISOString());
+      const areaGuide = ({
+        DEEP: "🌱 Growth — Today's learning or skill move (Python, HVAC, Revit, reading).",
+        WORK: "💼 Work — Today's top work or SDR move (Upflex, GTMx, outreach).",
+        LIFE: "🏠 Life — Today's personal, health, or errand move (gym, bills, passport)."
+      })[area] || `Set your ${area} outcome`;
       return {
         category: "Daily outcome",
-        title: `Set your ${area} outcome`,
-        sections: [{ heading: "", lines: ["What does done look like, and when will you do it?"] }],
+        title: areaGuide,
+        sections: [{
+          heading: "",
+          lines: ["What's the one thing you want to finish for this today? (You can include a deadline or time, like \"Finish brief by 5pm\".)"]
+        }],
         inputMode: "force_reply",
-        inputPlaceholder: "Describe one outcome for today"
+        inputPlaceholder: "Type your main move for today"
       };
     }
     return beginOutcomeSprint({ db, user, outcome, now });
@@ -1643,12 +1634,16 @@ async function beginGoalCapture(db, user, now) {
 
 async function showGoals({ db, user }) {
   const goals = await listGoals(db, user.id);
+  const name = await getDisplayName(db);
   if (!goals.length) {
     return {
       category: "Goals",
       title: "No objectives defined yet",
-      sections: [{ heading: "", lines: ["The assistant will not invent your goals. Start an interview to define one in your own words."] }],
-      actions: [[{ label: "Start goal interview", action: "goal_new" }]]
+      sections: [{ heading: "", lines: [`No goals set yet, ${name}. Want to lock in your first one? Takes about a minute.`] }],
+      actions: [[
+        { label: "Start goal interview", action: "goal_new" },
+        { label: "🏠 HQ", action: "home" }
+      ]]
     };
   }
   const visibleGoals = goals.slice(0, 8);
@@ -3894,13 +3889,38 @@ async function createOutcomeAndBeginSprint({ db, user, state, text, googleTasks,
   const outcome = await getDailyOutcome(db, date, state.area);
   if (!outcome) throw new Error("The new daily outcome was not recorded.");
   const prompt = await beginOutcomeSprint({ db, user, outcome, now });
+  const extraActions = outcome.google_task_id
+    ? [[{ label: "📅 Schedule on calendar", action: `calendar_block|${outcome.google_task_id}` }]]
+    : [];
   return {
     ...prompt,
     sections: [{
       heading: "Outcome saved as a Google Task",
-      lines: [text, "What is the smallest visible result you can finish in the next 25–50 minutes?"]
+      lines: [text, "What is the smallest visible step (subtask) you can finish in the next 25–50 minutes?"]
     }],
+    actions: [...(prompt.actions || []), ...extraActions],
     category: result.category
+  };
+}
+
+async function showPipelineSettings(db) {
+  const rows = await db.prepare(
+    "SELECT setting_key, setting_value FROM settings WHERE setting_key IN ('display_name','tone','checkin_minutes')"
+  ).all().then(r => r.results || []);
+  const map = Object.fromEntries(rows.map(r => [r.setting_key, r.setting_value]));
+  const pings = map.checkin_minutes === "0" ? "off" : `every ${map.checkin_minutes || "30"} min`;
+  return {
+    category: "Settings",
+    title: "",
+    sections: [{
+      heading: "",
+      lines: [
+        `Name: ${map.display_name || "Martino"}`,
+        `Vibe: ${map.tone || "cheeky"} (/vibe cheeky or gentle)`,
+        `Check-ins: ${pings} (/pings 30, 60, or off)`
+      ]
+    }],
+    actions: [[{ label: "⬅ Back", action: "pipeline_overview" }]]
   };
 }
 
