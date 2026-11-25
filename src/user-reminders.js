@@ -157,23 +157,36 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
   if (!enabled) return { sent: 0, snoozed: 0, missed: 0, uncertain: 0 };
   const target = await findTarget(db, authorizedTelegramUserId);
   if (!target) return { sent: 0, snoozed: 0, missed: 0, uncertain: 0 };
+
+  // Hold reminder delivery while user is in an active sleep session.
+  const activeSleep = await db.prepare(
+    "SELECT id FROM sleep_sessions WHERE user_id = ?1 AND status = 'active' AND wake_at > ?2 LIMIT 1"
+  ).bind(target.userId, now.toISOString()).first();
+  if (activeSleep) {
+    return { sent: 0, snoozed: 0, missed: 0, uncertain: 0 };
+  }
+
+  const nowIso = now.toISOString();
   const leaseUntil = new Date(now.getTime() + 2 * 60_000).toISOString();
   const due = await db.prepare(
     `SELECT id
        FROM reminders
-      WHERE status = 'pending' AND remind_at_utc <= ?1
-      ORDER BY remind_at_utc LIMIT 20`
-  ).bind(now.toISOString()).all();
+      WHERE (status = 'pending' OR (status = 'sending' AND claim_until IS NOT NULL AND claim_until < ?1))
+        AND remind_at_utc <= ?2
+      ORDER BY remind_at_utc ASC
+      LIMIT 10`
+  ).bind(nowIso, nowIso).all();
   let sent = 0;
   let missed = 0;
   let uncertain = 0;
   for (const row of due.results) {
     const claimed = await db.prepare(
       `UPDATE reminders
-          SET status = 'sending'
-        WHERE id = ?1 AND status = 'pending'
+          SET status = 'sending', claim_until = ?1
+        WHERE id = ?2
+          AND (status = 'pending' OR (status = 'sending' AND claim_until IS NOT NULL AND claim_until < ?3))
         RETURNING id, text, remind_at_utc, ping_count`
-    ).bind(row.id).first();
+    ).bind(leaseUntil, row.id, nowIso).first();
     if (!claimed) continue;
     try {
       const message = await telegram.sendAssistantResponse(target.chatId, {
@@ -189,9 +202,9 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
         ]]
       });
       await db.prepare(
-        `UPDATE reminders SET status='sent', sent_at=?1, ping_count=ping_count+1
+        `UPDATE reminders SET status='sent', sent_at=?1, ping_count=ping_count+1, claim_until=NULL
           WHERE id=?2 AND status='sending'`
-      ).bind(now.toISOString(), claimed.id).run();
+      ).bind(nowIso, claimed.id).run();
       await insertChannelMessage(db, {
         channel: "telegram",
         conversationId: target.chatId,
@@ -201,16 +214,16 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
         type: "message",
         category: "Reminder",
         deliveryStatus: "Sent",
-        createdAt: now.toISOString()
+        createdAt: nowIso
       });
       sent++;
     } catch (error) {
       await db.prepare(
-        `UPDATE reminders SET status='uncertain'
+        `UPDATE reminders SET status='uncertain', claim_until=NULL
           WHERE id=?1 AND status='sending'`
       ).bind(claimed.id).run();
       await logSystemEvent(db, {
-        occurredAt: now.toISOString(),
+        occurredAt: nowIso,
         severity: "ERROR",
         component: "User reminders",
         eventType: "Reminder delivery uncertain",
@@ -224,7 +237,9 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
   const sentOld = await db.prepare(
     `SELECT id, text, sent_at, ping_count
        FROM reminders
-      WHERE status='sent' AND sent_at <= ?1`
+      WHERE status='sent' AND sent_at <= ?1
+      ORDER BY sent_at ASC
+      LIMIT 5`
   ).bind(new Date(now.getTime() - 10 * 60_000).toISOString()).all();
   for (const reminder of sentOld.results) {
     if (Number(reminder.ping_count) < 2) {
@@ -238,13 +253,14 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
             { label: "⏰ +15 min", action: `reminder_snooze|${reminder.id}|15` }
           ]]
         });
-        await db.prepare("UPDATE reminders SET ping_count=ping_count+1 WHERE id=?1")
-          .bind(reminder.id).run();
+        await db.prepare("UPDATE reminders SET ping_count=ping_count+1, sent_at=?1 WHERE id=?2")
+          .bind(nowIso, reminder.id).run();
+        sent++;
       } catch (error) {
         await db.prepare("UPDATE reminders SET status='uncertain' WHERE id=?1")
           .bind(reminder.id).run();
         await logSystemEvent(db, {
-          occurredAt: now.toISOString(),
+          occurredAt: nowIso,
           severity: "ERROR",
           component: "User reminders",
           eventType: "Reminder follow-up delivery uncertain",

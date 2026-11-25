@@ -1284,6 +1284,15 @@ async function handleAction({
   const focusReason = identifier.match(/^fr\|([A-Za-z0-9-]{1,48})\|(unclear|information|energy|external)$/);
   if (focusReason) {
     const [, sessionId, reasonKey] = focusReason;
+    if (sessionId === "none") {
+      const voiceKey = ({
+        unclear: "reason_too_big",
+        energy: "reason_low_energy",
+        external: "reason_pulled_away",
+        information: "reason_too_big"
+      })[reasonKey] || "reason_too_big";
+      return response("Got it", say(voiceKey, { now, task: "this task" }) || "No stress—shrink it to the tiniest next step.");
+    }
     const session = await getFocusSession(db, sessionId);
     if (!session || session.response_status !== "BlockedPending") {
       return response("Focus follow-up expired", "This blocker choice is no longer available.");
@@ -4094,8 +4103,14 @@ async function updatePingsSetting(db, argumentsText, now) {
 async function pauseCompanion(db, user, argumentsText, now) {
   const until = new Date(now.getTime() + 2 * 60 * 60_000);
   await db.prepare(
-    `UPDATE companion_state SET paused_until=?1, updated_at=?2 WHERE user_id=?3`
-  ).bind(until.toISOString(), now.toISOString(), user.id).run();
+    `INSERT INTO companion_state (
+       user_id, cairo_date, consecutive_ignored, last_kind, last_proactive_at,
+       sent_today_count, paused_until, dive_until, awake_until, updated_at
+     ) VALUES (?1, ?2, 0, 'pause', NULL, 0, ?3, NULL, NULL, ?4)
+     ON CONFLICT(user_id) DO UPDATE SET
+       paused_until=excluded.paused_until,
+       updated_at=excluded.updated_at`
+  ).bind(user.id, cairoDateKey(now), until.toISOString(), now.toISOString()).run();
   return response("Paused", "Pulses are paused for 2 hours.");
 }
 

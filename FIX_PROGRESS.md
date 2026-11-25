@@ -21,3 +21,10 @@
 - Wired `conversationResponder` in `src/index.js`, `src/core/assistant.js`, and `src/core/magic-capture.js` (`handleCapturedConversation` + `cap_unk|chat`), preserving `onBeforeAiCall` typing indicator and multi-turn `chat_turns` continuity.
 - Upgraded deterministic conversation fallbacks in `magic-capture.js` (overdue, reminders, next, today, calendar, tired/care, casual greetings) and removed remaining banned/robotic phrases in `src/core/assistant.js`.
 - Added Deliverable 2 tests in `cloudflare/test/golden-conversations.test.js` covering grounded Workers AI Q&A, invalid AI output fallback, multi-turn `chat_turns`, and deterministic fallbacks.
+
+## Deliverable 3: Time-based features that never fail
+- Added additive migration `cloudflare/migrations/0014_v5_time_reliability.sql` (`reminders.claim_until` for atomic lease & stale-`sending` recovery).
+- Updated `cloudflare/src/user-reminders.js`: sleep-session hold, atomic `claim_until` lease + stale lease recovery, bounded oldest-first queries (`LIMIT 10` / `LIMIT 5`), and `sent_at` update on 2nd ping so `missed` waits 10 min after 2nd ping.
+- Updated `cloudflare/src/companion.js`: `dive_end` notification on dive expiry, 15-min spacing between wake re-pings using `VOICE_BANK`, settings-driven quiet hours (`00:30–08:00`), shift intervals (`checkin_minutes` / `checkin_minutes_shift`), `consecutive_ignored` backoff, daily cap with Cairo date rollover, and `selectToneTier` integration.
+- Fixed `fr|none|<reason>` (`companion_stuck`) and `/pause` upsert in `cloudflare/src/core/assistant.js`, and replaced hardcoded `"Mohamed"` in `cloudflare/src/scheduled.js` with `getDisplayName(env.DB)`.
+- Added Deliverable 3 tests in `cloudflare/test/golden-conversations.test.js`.

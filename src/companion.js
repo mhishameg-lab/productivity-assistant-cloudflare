@@ -8,6 +8,7 @@ import {
 } from "./core/format.js";
 import { cairoLocalDateTimeToIso } from "./integrations/google-calendar.js";
 import { logSystemEvent } from "./db/channel-repository.js";
+import { say, selectToneTier } from "./core/voice.js";
 
 export function parseDiveDuration(text) {
   const input = String(text || "").trim();
@@ -118,13 +119,21 @@ export async function processCompanion({
   const target = await findTarget(db, authorizedTelegramUserId);
   if (!target) return { sent: 0, ignored: 0, cared: 0 };
 
+  const settings = await loadCompanionSettings(db);
+  const name = settings.display_name || "Martino";
+
   const activeSleep = await db.prepare(
-    "SELECT id, wake_at, wake_sent_count FROM sleep_sessions WHERE user_id=?1 AND status='active' ORDER BY started_at DESC LIMIT 1"
+    "SELECT id, wake_at, wake_sent_count, last_wake_sent_at FROM sleep_sessions WHERE user_id=?1 AND status='active' ORDER BY started_at DESC LIMIT 1"
   ).bind(target.userId).first();
   if (activeSleep) {
     const wakeAt = Date.parse(activeSleep.wake_at);
     if (now.getTime() >= wakeAt) {
-      if (Number(activeSleep.wake_sent_count) >= 3) {
+      const sentCount = Number(activeSleep.wake_sent_count || 0);
+      if (activeSleep.last_wake_sent_at &&
+          now.getTime() - Date.parse(activeSleep.last_wake_sent_at) < 15 * 60_000) {
+        return { sent: 0, ignored: 0, cared: 0 };
+      }
+      if (sentCount >= 3) {
         await db.prepare("UPDATE sleep_sessions SET status='no_answer' WHERE id=?1")
           .bind(activeSleep.id).run();
         return { sent: 0, ignored: 1, cared: 0 };
@@ -134,10 +143,13 @@ export async function processCompanion({
             SET wake_sent_count=wake_sent_count+1, last_wake_sent_at=?1
           WHERE id=?2 AND status='active'`
       ).bind(now.toISOString(), activeSleep.id).run();
+      const wakeKey = sentCount === 0 ? "sleep_wake" : sentCount === 1 ? "sleep_reping_2" : "sleep_reping_3";
+      const line = say(wakeKey, { name, time: timeLabel(wakeAt), now }) ||
+        `☀️ Rise and shine, ${name}. It's ${timeLabel(wakeAt)}. Ready to get after it?`;
       await telegram.sendAssistantResponse(target.chatId, {
         category: "Sleep wake",
         title: "",
-        sections: [{ heading: "", lines: [`☀️ Rise and shine, Martino. It's ${timeLabel(wakeAt)}. Ready to get after it?`] }],
+        sections: [{ heading: "", lines: [line] }],
         actions: [[{ label: "☀️ I'm up", action: "sleep_up" }]]
       });
       return { sent: 1, ignored: 0, cared: 0 };
@@ -146,22 +158,68 @@ export async function processCompanion({
   }
 
   const state = await db.prepare(
-    "SELECT dive_until, paused_until, sent_today_count, consecutive_ignored FROM companion_state WHERE user_id=?1"
+    `SELECT cairo_date, dive_until, paused_until, sent_today_count, consecutive_ignored,
+            tier_override_until, last_proactive_at
+       FROM companion_state
+      WHERE user_id=?1`
   ).bind(target.userId).first();
-  if (state && state.dive_until && Date.parse(state.dive_until) > now.getTime()) {
-    return { sent: 0, ignored: 0, cared: 0 };
+
+  if (state && state.dive_until) {
+    const diveUntilMs = Date.parse(state.dive_until);
+    if (diveUntilMs > now.getTime()) {
+      return { sent: 0, ignored: 0, cared: 0 };
+    }
+    // Dive ended: clear dive_until atomically and send welcome-back notification once.
+    const cleared = await db.prepare(
+      `UPDATE companion_state
+          SET dive_until=NULL, last_kind='dive_end', updated_at=?1
+        WHERE user_id=?2 AND dive_until IS NOT NULL
+        RETURNING user_id`
+    ).bind(now.toISOString(), target.userId).first();
+    if (cleared) {
+      const line = say("dive_end", { name, now }) || `🎧 Time's up, ${name}. Welcome back. What was the win?`;
+      await telegram.sendAssistantResponse(target.chatId, {
+        category: "Dive",
+        title: "",
+        sections: [{ heading: "", lines: [line] }],
+        actions: [[
+          { label: "▶️ Go", action: "focus_now" },
+          { label: "📱 HQ", action: "home" }
+        ]]
+      });
+      return { sent: 1, ignored: 0, cared: 0 };
+    }
   }
+
   if (state && state.paused_until && Date.parse(state.paused_until) > now.getTime()) {
     return { sent: 0, ignored: 0, cared: 0 };
   }
+
   const date = cairoDateKey(now);
-  const cap = await db.prepare("SELECT setting_value FROM settings WHERE setting_key='daily_checkin_cap'")
-    .first();
-  if (state && Number(state.sent_today_count) >= Number(cap ? cap.setting_value : 18)) {
+  const sentToday = state && state.cairo_date === date ? Number(state.sent_today_count || 0) : 0;
+  const dailyCap = Number(settings.daily_checkin_cap || 18);
+  if (sentToday >= dailyCap) {
     return { sent: 0, ignored: 0, cared: 0 };
   }
-  const hour = Number(cairoTimeParts(now).hour);
-  if (hour >= 0 && hour < 8) return { sent: 0, ignored: 0, cared: 0 };
+
+  const parts = cairoTimeParts(now);
+  const minuteOfDay = Number(parts.hour) * 60 + Number(parts.minute);
+  if (isWithinTimeWindow(minuteOfDay, settings.quiet_start || "00:30", settings.quiet_end || "08:00")) {
+    return { sent: 0, ignored: 0, cared: 0 };
+  }
+
+  const inShift = isWithinTimeWindow(minuteOfDay, settings.shift_start || "15:00", settings.shift_end || "23:00");
+  const baseIntervalMin = Number(inShift ? (settings.checkin_minutes_shift || 60) : (settings.checkin_minutes ?? 30));
+  if (!Number.isFinite(baseIntervalMin) || baseIntervalMin <= 0) {
+    return { sent: 0, ignored: 0, cared: 0 };
+  }
+  const consecutiveIgnored = state ? Number(state.consecutive_ignored || 0) : 0;
+  const backoffMultiplier = consecutiveIgnored >= 2 ? Math.min(4, 1 + Math.floor(consecutiveIgnored / 2)) : 1;
+  const effectiveIntervalMs = baseIntervalMin * backoffMultiplier * 60_000;
+  if (state && state.last_proactive_at &&
+      now.getTime() - Date.parse(state.last_proactive_at) < effectiveIntervalMs) {
+    return { sent: 0, ignored: 0, cared: 0 };
+  }
 
   let task = null;
   if (googleTasks) {
@@ -188,7 +246,28 @@ export async function processCompanion({
   }
   if (!task) return { sent: 0, ignored: 0, cared: 0 };
 
-  const text = `Yo Martino, “${task.title}” is up next. 25 minutes, let's get it.`;
+  const overdueDays = task.due_date && task.due_date < date
+    ? Math.max(1, Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${task.due_date}T00:00:00Z`)) / 86_400_000))
+    : 0;
+  const tier = selectToneTier({
+    consecutiveIgnored,
+    overdueDays,
+    highPriorityOverdue: task.priority === "High" && overdueDays > 0,
+    tone: settings.tone || "cheeky",
+    careOverrideUntil: state ? state.tier_override_until : null,
+    diveUntil: state ? state.dive_until : null,
+    sleepActive: false,
+    now,
+    wakeTimeMinute: parseHmMinutes(settings.quiet_end || "08:00")
+  });
+  const text = say(tier, {
+    name,
+    task: task.title,
+    n: Math.max(1, overdueDays || consecutiveIgnored || 1),
+    counter: sentToday,
+    now
+  }) || `Yo ${name}, “${task.title}” is up next. 25 minutes, let's get it.`;
+
   await telegram.sendAssistantResponse(target.chatId, {
     category: "Check-in",
     title: "",
@@ -201,8 +280,8 @@ export async function processCompanion({
   });
   await db.prepare(
     `INSERT INTO checkin_log (id, user_id, sent_at, kind, tier, task_ref, status)
-     VALUES (?1, ?2, ?3, 'task', 'tier1', ?4, 'sent')`
-  ).bind(`CHECK-${crypto.randomUUID()}`, target.userId, now.toISOString(), task.title).run();
+     VALUES (?1, ?2, ?3, 'task', ?4, ?5, 'sent')`
+  ).bind(`CHECK-${crypto.randomUUID()}`, target.userId, now.toISOString(), tier, task.title).run();
   await db.prepare(
     `INSERT INTO companion_state (
        user_id, cairo_date, consecutive_ignored, last_kind, last_proactive_at,
@@ -212,10 +291,40 @@ export async function processCompanion({
        cairo_date=?2,
        last_kind='checkin',
        last_proactive_at=?3,
-       sent_today_count=sent_today_count+1,
+       sent_today_count=CASE WHEN companion_state.cairo_date=?2 THEN companion_state.sent_today_count+1 ELSE 1 END,
        updated_at=?4`
   ).bind(target.userId, date, now.toISOString(), now.toISOString()).run();
-  return { sent: 1, ignored: 0, cared: 0 };
+  return { sent: 1, ignored: 0, cared: tier === "tierC" ? 1 : 0 };
+}
+
+async function loadCompanionSettings(db) {
+  try {
+    const res = await db.prepare(
+      `SELECT setting_key, setting_value
+         FROM settings
+        WHERE setting_key IN (
+          'display_name','tone','checkin_minutes','checkin_minutes_shift',
+          'shift_start','shift_end','quiet_start','quiet_end','daily_checkin_cap'
+        )`
+    ).all();
+    return Object.fromEntries((res.results || []).map(r => [r.setting_key, r.setting_value]));
+  } catch {
+    return {};
+  }
+}
+
+function parseHmMinutes(hm) {
+  const m = String(hm || "").match(/^(\d{1,2}):(\d{2})$/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+function isWithinTimeWindow(minuteOfDay, startHm, endHm) {
+  const start = parseHmMinutes(startHm);
+  const end = parseHmMinutes(endHm);
+  if (start == null || end == null) return false;
+  if (start < end) return minuteOfDay >= start && minuteOfDay < end;
+  if (start > end) return minuteOfDay >= start || minuteOfDay < end;
+  return false;
 }
 
 async function findTarget(db, authorizedTelegramUserId) {

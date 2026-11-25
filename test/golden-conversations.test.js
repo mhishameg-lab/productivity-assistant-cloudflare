@@ -6,6 +6,9 @@ import { adaptTelegramUpdate } from "../src/channels/telegram.js";
 import { getOrCreateChannelUser } from "../src/db/channel-repository.js";
 import { upsertGoogleTaskMirror } from "../src/db/google-tasks-repository.js";
 import { handleAssistantMessage } from "../src/core/assistant.js";
+import { processCompanion, startDive, startSleep } from "../src/companion.js";
+import { processUserReminders } from "../src/user-reminders.js";
+import { insertChannelMessage } from "../src/db/channel-repository.js";
 import { parseWithWorkersAi, validateCaptureResponse } from "../src/ai/capture-parser.js";
 import {
   buildConversationFacts,
@@ -652,6 +655,128 @@ test("Deliverable 2: Workers AI human conversation, grounded FACTS, validation, 
   assert.equal(facts.name, "Martino");
   assert.equal(facts.overdueCount, 1);
   assert.equal(facts.calendarEvents.length, 1);
+
+  sqlite.close();
+});
+
+test("Deliverable 3: reminders sleep-hold, stale lease recovery, dive_end, wake spacing, and check-in backoff", async () => {
+  const { sqlite, d1 } = await createDb();
+  const user = await getOrCreateChannelUser(d1, "telegram", "time-user", NOW.toISOString());
+  await insertChannelMessage(d1, {
+    channel: "telegram",
+    conversationId: "time-chat",
+    externalMessageId: "msg-time-1",
+    userId: user.id,
+    direction: "incoming",
+    type: "text",
+    createdAt: NOW.toISOString()
+  });
+
+  const sent = [];
+  const telegram = {
+    async sendAssistantResponse(chatId, payload) {
+      sent.push({ chatId, payload });
+      return { message_id: sent.length };
+    }
+  };
+
+  // 1. Sleep holds reminders until wake
+  const wakeAt = new Date(NOW.getTime() + 60 * 60_000); // 3:00 PM Cairo
+  await startSleep({ db: d1, user, wakeAt, now: NOW });
+  await d1.prepare(
+    `INSERT INTO reminders (id, user_id, text, remind_at_utc, status, created_at, request_id)
+     VALUES ('REM-SLEEP-1', ?1, 'Take meds', ?2, 'pending', ?3, 'REQ-SLEEP-1')`
+  ).bind(user.id, new Date(NOW.getTime() + 10 * 60_000).toISOString(), NOW.toISOString()).run();
+
+  const whileAsleep = await processUserReminders({
+    db: d1,
+    telegram,
+    now: new Date(NOW.getTime() + 20 * 60_000),
+    authorizedTelegramUserId: "time-user",
+    enabled: true
+  });
+  assert.equal(whileAsleep.sent, 0);
+  assert.equal(sent.length, 0);
+
+  // Wake ping 1 at wakeAt, then re-ping blocked within 15 min, allowed at +15 min
+  const wake1 = await processCompanion({
+    db: d1, telegram, now: wakeAt, authorizedTelegramUserId: "time-user", enabled: true
+  });
+  assert.equal(wake1.sent, 1);
+  const wakeTooSoon = await processCompanion({
+    db: d1, telegram, now: new Date(wakeAt.getTime() + 5 * 60_000), authorizedTelegramUserId: "time-user", enabled: true
+  });
+  assert.equal(wakeTooSoon.sent, 0);
+  const wake2 = await processCompanion({
+    db: d1, telegram, now: new Date(wakeAt.getTime() + 15 * 60_000), authorizedTelegramUserId: "time-user", enabled: true
+  });
+  assert.equal(wake2.sent, 1);
+  assert.match(sent[1]?.payload?.sections?.[0]?.lines?.[0] || "", /still out/i);
+
+  // Mark user awake, then held reminder delivers; stale 'sending' lease recovers
+  await d1.prepare("UPDATE sleep_sessions SET status='woke', acked_at=?1 WHERE user_id=?2")
+    .bind(wakeAt.toISOString(), user.id).run();
+  const afterWake = await processUserReminders({
+    db: d1, telegram, now: new Date(wakeAt.getTime() + 20 * 60_000), authorizedTelegramUserId: "time-user", enabled: true
+  });
+  assert.equal(afterWake.sent, 1);
+
+  // Stale 'sending' lease recovery
+  await d1.prepare(
+    `INSERT INTO reminders (id, user_id, text, remind_at_utc, status, created_at, claim_until, request_id)
+     VALUES ('REM-STALE-1', ?1, 'Stale lease', ?2, 'sending', ?3, ?4, 'REQ-STALE-1')`
+  ).bind(
+    user.id,
+    new Date(NOW.getTime() - 10 * 60_000).toISOString(),
+    NOW.toISOString(),
+    new Date(NOW.getTime() - 60_000).toISOString()
+  ).run();
+  const recovered = await processUserReminders({
+    db: d1, telegram, now: new Date(wakeAt.getTime() + 25 * 60_000), authorizedTelegramUserId: "time-user", enabled: true
+  });
+  assert.equal(recovered.sent, 1);
+
+  // 2. Dive end notification fires once when dive_until passes
+  sent.length = 0;
+  const diveStart = new Date(wakeAt.getTime() + 30 * 60_000);
+  await startDive({ db: d1, user, minutes: 30, now: diveStart });
+  const duringDive = await processCompanion({
+    db: d1, telegram, now: new Date(diveStart.getTime() + 15 * 60_000), authorizedTelegramUserId: "time-user", enabled: true
+  });
+  assert.equal(duringDive.sent, 0);
+  const afterDive = await processCompanion({
+    db: d1, telegram, now: new Date(diveStart.getTime() + 35 * 60_000), authorizedTelegramUserId: "time-user", enabled: true
+  });
+  assert.equal(afterDive.sent, 1);
+  assert.match(sent[0].payload.sections[0].lines[0], /Time's up, Martino/i);
+
+  // 3. Quiet hours: 00:15 Cairo is active; 01:00 Cairo is quiet
+  await upsertGoogleTaskMirror(d1, {
+    id: "gt-late-1",
+    title: "Late task",
+    status: "needsAction",
+    due: "2026-11-24T00:00:00.000Z"
+  }, NOW.toISOString(), { area: "WORK", priority: "High" });
+  const googleTasks = { async listAll() { return []; } };
+  const quietRun = await processCompanion({
+    db: d1,
+    telegram,
+    now: new Date("2026-11-25T23:00:00.000Z"), // 01:00 AM Cairo
+    authorizedTelegramUserId: "time-user",
+    googleTasks,
+    enabled: true
+  });
+  assert.equal(quietRun.sent, 0);
+
+  // 4. companion_stuck -> fr|none|unclear works & /pause upserts companion_state
+  const stuckRes = await handleAssistantMessage({
+    db: d1, user, message: tapAction("fr|none|unclear"), companionEnabled: true, now: NOW
+  });
+  assert.match(responseText(stuckRes), /25 minutes/i);
+  const pauseRes = await handleAssistantMessage({
+    db: d1, user, message: textMsg("/pause"), companionEnabled: true, now: NOW
+  });
+  assert.match(responseText(pauseRes), /paused for 2 hours/i);
 
   sqlite.close();
 });

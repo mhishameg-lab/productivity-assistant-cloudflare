@@ -205,6 +205,7 @@ export async function handleScheduledEvent(controller, env, ctx) {
     googleTasks,
     googleCalendar
   });
+  const displayName = await getDisplayName(env.DB);
   const reports = await processScheduledReports({
     db: env.DB,
     googleTasks,
@@ -212,7 +213,7 @@ export async function handleScheduledEvent(controller, env, ctx) {
     recipient: env.PRODUCTIVITY_EMAIL_RECIPIENT,
     aiReviewRecommendations,
     htmlEmailsEnabled: env.HTML_EMAILS_ENABLED === "true",
-    displayName: "Mohamed",
+    displayName,
     now
   });
   const escalations = await processHighPriorityEscalations({
