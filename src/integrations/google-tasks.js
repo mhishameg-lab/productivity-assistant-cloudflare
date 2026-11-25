@@ -89,10 +89,13 @@ export function createGoogleTasksClient(env, fetchImpl = fetch, clock = () => Da
       );
     },
 
-    async create(title, notes, dueDate) {
+    async create(title, notes, dueDate, parentGoogleTaskId = null) {
       const task = { title, notes };
       if (dueDate) task.due = `${dueDate}T00:00:00.000Z`;
-      return request(`/lists/${encodeURIComponent(env.GOOGLE_TASK_LIST_ID)}/tasks`, {
+      const query = parentGoogleTaskId
+        ? `?parent=${encodeURIComponent(parentGoogleTaskId)}`
+        : "";
+      return request(`/lists/${encodeURIComponent(env.GOOGLE_TASK_LIST_ID)}/tasks${query}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(task)

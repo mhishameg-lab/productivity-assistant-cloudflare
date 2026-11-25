@@ -295,16 +295,16 @@ async function performTelegramWebhookCutover(env, now) {
     await telegram.setMyCommands([
       { command: "hq", description: "📱 Your HQ: now, next, today" },
       { command: "go", description: "▶️ Start the next move" },
-      { command: "drop", description: "📝 Drop a task" },
-      { command: "wya", description: "🧭 Where I'm at" },
+      { command: "drop", description: "📝 Drop a task or reminder" },
       { command: "plan", description: "🗓 Plan your day" },
-      { command: "zzz", description: "😴 Sleep mode and wake-up" },
-      { command: "dive", description: "🎧 Leave me alone for a few hours" },
-      { command: "remind", description: "⏰ Remind me about something" },
+      { command: "wya", description: "🧭 Where I'm at" },
       { command: "stack", description: "📋 Your task stack" },
-      { command: "late", description: "🔴 What's overdue" },
+      { command: "late", description: "🔴 Overdue tasks" },
       { command: "mail", description: "📥 Unread mail" },
-      { command: "pipeline", description: "🔧 How this bot works" }
+      { command: "remind", description: "⏰ Set a reminder" },
+      { command: "brainstorm", description: "🧠 Brainstorm vault" },
+      { command: "zzz", description: "😴 Sleep mode & wake-up" },
+      { command: "dive", description: "🎧 Focus dive mode" }
     ]);
     if (env.MINI_APP_ENABLED === "true" && env.PUBLIC_BASE_URL) {
       await telegram.setChatMenuButton({

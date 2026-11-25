@@ -780,6 +780,20 @@ async function handleAction({
       inputPlaceholder: "New task name"
     };
   }
+  const taskAddSubMatch = identifier.match(/^task_add_sub\|([A-Za-z0-9_-]{1,120})$/);
+  if (taskAddSubMatch) {
+    await setConversationState(db, user.id, {
+      type: "task_add_sub",
+      parentGoogleTaskId: taskAddSubMatch[1]
+    }, now.toISOString());
+    return {
+      category: "Add subtask",
+      title: "",
+      sections: [{ heading: "", lines: ["↳ Type the subtask name:"] }],
+      inputMode: "force_reply",
+      inputPlaceholder: "Subtask title"
+    };
+  }
   const taskDuePickMatch = identifier.match(/^task_due_pick\|([A-Za-z0-9_-]{1,120})$/);
   if (taskDuePickMatch) {
     const id = taskDuePickMatch[1];
@@ -904,35 +918,42 @@ async function handleAction({
         "Gmail and Google Tasks must both be connected. No task was created."
       );
     }
-    const thread = await googleGmail.getThreadSummary(gmailFollowUp[1]);
-    if (!thread) {
-      return response(
-        "Email conversation unavailable",
-        "I couldn't verify that Gmail conversation. No task was created."
-      );
+    try {
+      const thread = await googleGmail.getThreadSummary(gmailFollowUp[1]);
+      if (!thread) {
+        return response(
+          "Email conversation unavailable",
+          "I couldn't verify that Gmail conversation. No task was created."
+        );
+      }
+      return await createCapturedTask({
+        db,
+        user,
+        state: {
+          requestId: `TASK-GMAIL-${thread.threadId}`,
+          title: `Follow up: ${truncate(thread.subject || "(no subject)", 160)}`,
+          area: "Admin",
+          priority: "Medium",
+          dueDate: "",
+          doneTest: "Review the email thread and complete or define the requested next step."
+        },
+        addToTop3: false,
+        googleTasks,
+        now,
+        clearConversation: false
+      });
+    } catch {
+      return response("Gmail", "Couldn't create that follow-up task right now. Try again in a moment.");
     }
-    return createCapturedTask({
-      db,
-      user,
-      state: {
-        requestId: `TASK-GMAIL-${thread.threadId}`,
-        title: `Follow up: ${truncate(thread.subject || "(no subject)", 160)}`,
-        area: "Admin",
-        priority: "Medium",
-        dueDate: "",
-        doneTest: "Review the email thread and complete or define the requested next step."
-      },
-      addToTop3: false,
-      googleTasks,
-      now,
-      clearConversation: false
-    });
   }
   if (identifier === "goals_show") return showGoals({ db, user });
   if (identifier === "goal_new") return beginGoalCapture(db, user, now);
   if (identifier === "add_task") return beginTaskCapture(db, user, now);
   if (identifier === "focus_now") return beginFocusNow({ db, user, now });
   if (identifier === "plan_next_day_now") return beginNextDayPlanning({ db, user, now });
+  if (identifier === "plan_tomorrow_easy") {
+    return showTomorrowEasyPlan({ db, googleTasks, now });
+  }
   if (identifier === "plan_my_day") {
     return {
       ...(await showPlanForDate({
@@ -1780,7 +1801,7 @@ async function showGoals({ db, user }) {
       sections: [{ heading: "", lines: [`No goals set yet, ${name}. Want to lock in your first one? Takes about a minute.`] }],
       actions: [[
         { label: "Start goal interview", action: "goal_new" },
-        { label: "🏠 HQ", action: "home" }
+        { label: "📱 HQ", action: "home_back" }
       ]]
     };
   }
@@ -2301,6 +2322,23 @@ async function handleConversationText({
     await upsertGoogleTaskMirror(db, updated, now.toISOString());
     await clearConversationState(db, user.id);
     return showTaskDetail({ db, googleTasks, googleTaskId: state.googleTaskId, now, note: `✏️ Renamed to “${text.trim()}”.` });
+  }
+
+  if (state.type === "task_add_sub") {
+    if (!text.trim() || text.length > 200) {
+      return response("Add subtask", "Keep the subtask under 200 characters.");
+    }
+    if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
+    const created = await googleTasks.create(text.trim(), "", "", state.parentGoogleTaskId);
+    await upsertGoogleTaskMirror(db, created, now.toISOString());
+    await clearConversationState(db, user.id);
+    return showTaskDetail({
+      db,
+      googleTasks,
+      googleTaskId: state.parentGoogleTaskId,
+      now,
+      note: `↳ Added subtask “${text.trim()}”.`
+    });
   }
 
   if (state.type === "reminder_custom_full") {
@@ -3445,17 +3483,19 @@ export function formatTaskStack(tasks) {
 export async function showTaskStack({ db, googleTasks, now }) {
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
   await syncTaskList({ db, googleTasks, now });
-  const tasks = await listPendingTaskMirrors(db, cairoDateKey(now), 8, 0);
-  const completionRows = tasks.slice(0, 3).map(task => ({
-    label: `✅ Done · ${task.title.slice(0, 22)}`,
-    action: `task_complete|${task.google_task_id || task.id}`
+  const today = cairoDateKey(now);
+  const tasks = await listPendingTaskMirrors(db, today, 8, 0);
+  const circle = t => (t.due_date && t.due_date < today ? "🔴" : t.due_date === today ? "🟡" : t.due_date ? "🟢" : "⚪");
+  const openRows = tasks.slice(0, 3).map(task => ({
+    label: `${circle(task)} ${task.title.slice(0, 16)}`,
+    action: `task_open|${task.google_task_id || task.id}`
   }));
-  const actions = completionRows.length
-    ? [completionRows, [{ label: "More", action: "show_tasks" }]]
-    : [[{ label: "More", action: "show_tasks" }]];
+  const actions = openRows.length
+    ? [openRows, [{ label: "📋 All tasks", action: "show_tasks" }, { label: "📱 HQ", action: "home_back" }]]
+    : [[{ label: "📋 All tasks", action: "show_tasks" }, { label: "📱 HQ", action: "home_back" }]];
   return {
     category: "Task stack",
-    title: "",
+    title: "📋 Task stack (tap to inspect)",
     sections: [{ heading: "", lines: formatTaskStack(tasks) }],
     actions
   };
@@ -3678,41 +3718,80 @@ async function showPlanForDate({ db, user, googleTasks, googleCalendar, date, ti
   if (!isValidDateKey(date)) throw new TypeError("Requested plan date is invalid.");
   if (!googleTasks) throw new Error("Google Tasks integration is not configured.");
   await syncTaskList({ db, googleTasks, now });
-  const outcomes = await getDailyOutcomesForDate(db, date);
+  const today = cairoDateKey(now);
   const taskCandidates = await listPendingTaskPlanningCandidates(db, date);
-  const taskPlan = buildDailyTaskPlan(taskCandidates, date);
-  const goalFocus = await listDailyGoalFocus(db, user.id, date);
+  const overdue = taskCandidates.filter(t => t.due_date && t.due_date < today).slice(0, 4);
+  const dueOnDate = taskCandidates.filter(t => t.due_date === date).slice(0, 5);
+  const topFocus = overdue[0] || dueOnDate[0] || taskCandidates[0] || null;
   const calendar = await readCalendarEvents(db, googleCalendar, date, now);
+
+  const lines = [
+    `🎯 Top move: ${topFocus ? topFocus.title : "Clean slate — add 1 move below."}`
+  ];
+  if (overdue.length) {
+    lines.push("", `🔴 Overdue (${overdue.length}):`);
+    for (const t of overdue) lines.push(`  🔴 ${t.title}`);
+  }
+  if (dueOnDate.length) {
+    lines.push("", `🟡 Due ${date === today ? "today" : shortDate(date)} (${dueOnDate.length}):`);
+    for (const t of dueOnDate) lines.push(`  🟡 ${t.title}`);
+  }
+  if (calendar.enabled && calendar.events && calendar.events.length) {
+    lines.push("", "📅 Calendar:");
+    for (const ev of calendar.events.slice(0, 3)) lines.push(`  📅 ${formatCalendarEvent(ev)}`);
+  }
+  lines.push("", "⚡ Guide: Pick 1–3 moves max, block 25–50m on the top one, ignore the rest.");
+
   return {
     category: "Daily plan",
-    title,
-    sections: [
-      { heading: "🌱 Growth · 💼 Work · 🏠 Life", lines: outcomes },
-      ...formatDailyTaskPlan(taskPlan, date, cairoDateKey(now)),
-      {
-        heading: "Goal-aligned next actions",
-        lines: goalFocus.length
-          ? formatGoalFocus(goalFocus, date)
-          : ["No objectives defined yet. Use /goal to define one when ready."]
-      },
-      {
-        heading: "Calendar",
-        lines: !calendar.enabled
-          ? ["Calendar integration is disabled until OAuth access is authorized."]
-          : calendar.events
-            ? calendar.events.length
-              ? calendar.events.map(formatCalendarEvent)
-              : ["No appointments on this date."]
-            : [
-                `Calendar unavailable (${calendar.errorDetails}).`,
-                formatCalendarFailureGuidance(calendar.errorDetails),
-                "The task plan is still available."
-              ]
-      }
-    ],
+    title: `🗓 ${title} · ${shortDate(date)}`,
+    sections: [{ heading: "", lines }],
     actions: [
-      [{ label: "Plan tomorrow", action: "plan_next_day_now" }],
-      [{ label: "Back to home", action: "home" }]
+      [
+        { label: "▶️ Go", action: "focus_now" },
+        { label: "📋 Tasks", action: "show_tasks" },
+        { label: "🤖 AI pick", action: `ai_daily_plan|${today}` }
+      ],
+      [
+        { label: "🌙 Plan tmrw", action: "plan_tomorrow_easy" },
+        { label: "📱 HQ", action: "home_back" }
+      ]
+    ]
+  };
+}
+
+async function showTomorrowEasyPlan({ db, googleTasks, now }) {
+  const today = cairoDateKey(now);
+  const tomorrow = shiftDateKey(today, 1);
+  if (googleTasks) {
+    try { await syncTaskList({ db, googleTasks, now }); } catch {}
+  }
+  const candidates = await listPendingTaskPlanningCandidates(db, tomorrow);
+  const dueTmrw = candidates.filter(t => t.due_date === tomorrow).slice(0, 5);
+  const lines = dueTmrw.length
+    ? [
+        `Already lined up for ${shortDate(tomorrow)}:`,
+        ...dueTmrw.map(t => `🟡 ${t.title}`),
+        "",
+        "💡 How to prep: Pick just 1 main win so you wake up with zero guesswork. Drop it in 1 line anytime (e.g. \"Call Ahmed tomorrow 10am\")."
+      ]
+    : [
+        `Clean slate for ${shortDate(tomorrow)}!`,
+        "",
+        "💡 How to prep: Drop 1 main win right now (e.g. \"Finish Upflex brief tomorrow 9am\") so tomorrow starts on autopilot."
+      ];
+  return {
+    category: "Tomorrow",
+    title: `🌙 Tomorrow · ${shortDate(tomorrow)}`,
+    sections: [{ heading: "", lines }],
+    actions: [
+      [
+        { label: "📝 Drop 1 move", action: "add_task" },
+        { label: "🤖 AI pick", action: `ai_daily_plan|${today}` }
+      ],
+      [
+        { label: "📱 HQ", action: "home_back" }
+      ]
     ]
   };
 }
@@ -3768,7 +3847,7 @@ async function showTasks({ db, googleTasks, now }) {
       category: "Task list",
       title: "Your open tasks",
       sections: [{ heading: "", lines: ["Clean slate! Nothing pending right now."] }],
-      actions: [[{ label: "📝 Drop one", action: "add_task" }, { label: "📱 HQ", action: "home" }]]
+      actions: [[{ label: "📝 Drop one", action: "add_task" }, { label: "📱 HQ", action: "home_back" }]]
     };
   }
 
@@ -3788,7 +3867,7 @@ async function showTasks({ db, googleTasks, now }) {
   for (let i = 0; i < taskButtons.length; i += 2) {
     actions.push(taskButtons.slice(i, i + 2));
   }
-  actions.push([{ label: "📱 HQ", action: "home" }]);
+  actions.push([{ label: "📱 HQ", action: "home_back" }]);
   return {
     category: "Task list",
     title: "📋 Open tasks (tap to inspect)",
@@ -3810,7 +3889,7 @@ async function showTaskDetail({ db, googleTasks, googleTaskId, now, note = null 
        FROM tasks
       WHERE parent_google_task_id = ?1 AND status = 'Pending'
       ORDER BY due_date IS NULL, due_date, title
-      LIMIT 5`
+      LIMIT 8`
   ).bind(googleTaskId).all().then(r => r.results || []);
   const circle = task.due_date && task.due_date < today ? "🔴" : task.due_date === today ? "🟡" : task.due_date ? "🟢" : "⚪";
   const pri = task.priority === "High" ? " 🔥" : task.priority === "Low" ? " 🧊" : "";
@@ -3820,12 +3899,13 @@ async function showTaskDetail({ db, googleTasks, googleTaskId, now, note = null 
     `📅 ${task.due_date ? shortDate(task.due_date) : "No deadline"} · ${task.priority || "Medium"}`
   ];
   if (subs.length) {
-    lines.push("", "↳ Subtasks:");
+    lines.push("", `↳ Subtasks (${subs.length}):`);
     for (const s of subs) lines.push(`  ⚪ ${s.title}`);
   }
   const actions = [];
-  if (subs.length) {
-    actions.push(subs.slice(0, 2).map(s => ({
+  const visibleSubs = subs.slice(0, 6);
+  for (let i = 0; i < visibleSubs.length; i += 2) {
+    actions.push(visibleSubs.slice(i, i + 2).map(s => ({
       label: `↳ ${s.title.slice(0, 14)}`,
       action: `task_open|${s.google_task_id}`
     })));
@@ -3836,6 +3916,7 @@ async function showTaskDetail({ db, googleTasks, googleTaskId, now, note = null 
   ]);
   actions.push([
     { label: "📅 Deadline", action: `task_due_pick|${task.google_task_id}` },
+    { label: "➕ Subtask", action: `task_add_sub|${task.google_task_id}` },
     { label: "✖", action: "show_tasks" }
   ]);
   return {
@@ -3859,7 +3940,7 @@ async function showOverdueTasks({ db, googleTasks, now, detailMode = false }) {
         heading: "",
         lines: ["Clean! Nothing overdue right now. 🎉"]
       }],
-      actions: [[{ label: "📱 HQ", action: "home" }]]
+      actions: [[{ label: "📱 HQ", action: "home_back" }]]
     };
   }
   const actions = detailMode
@@ -4700,10 +4781,11 @@ async function showSingleEmailDetail({ db, googleGmail, emailFollowUpAnalyzer, t
   if (!googleGmail) return response("Gmail", "Gmail is disabled right now.");
   try {
     const thread = await googleGmail.getThreadSummary(threadId);
-    const sender = String(thread.from || "").replace(/<[^>]+>/g, "").trim() || thread.from;
+    if (!thread) return response("Gmail", "Couldn't find that email right now.");
+    const sender = String(thread.from || "").replace(/<[^>]+>/g, "").trim() || thread.from || "Unknown";
     return {
       category: "Gmail",
-      title: `📩 ${truncate(thread.subject, 80)}`,
+      title: `📩 ${truncate(thread.subject || "(no subject)", 80)}`,
       sections: [{
         heading: "",
         lines: [

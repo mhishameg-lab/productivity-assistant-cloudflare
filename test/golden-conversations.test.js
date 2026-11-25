@@ -809,11 +809,11 @@ test("Deliverable 4: cleanup routes (/plan, /recap, start_task, pipeline_setting
   });
   assert.match(responseText(recapRes), /Weekly|1\/5|completed/i);
 
-  // /stack uses google_task_id in task_complete action
+  // /stack uses google_task_id in task_open action
   const stackRes = await handleAssistantMessage({
     db: d1, user, message: textMsg("/stack"), googleTasks, now: NOW
   });
-  assert.equal(stackRes.actions[0][0].action, "task_complete|gt-stack-1");
+  assert.equal(stackRes.actions[0][0].action, "task_open|gt-stack-1");
 
   // start_task|<id>, pipeline_settings, and tomorrow callbacks all resolve
   const startRes = await handleAssistantMessage({
@@ -913,6 +913,34 @@ test("User UX upgrades: /start guide, exact-name edit prompt, task detail & rena
   const row = sqlite.prepare("SELECT content FROM brainstorms WHERE user_id = ?1").get(user.id);
   assert.match(row.content, /HVAC calculator SaaS/);
   assert.match(row.content, /B2B SDR outreach/);
+
+  // 6. /plan clean layout + plan_tomorrow_easy + home_back -> HQ + >2 subtasks & task_add_sub
+  await upsertGoogleTaskMirror(d1, { id: "sub-1", title: "Sub 1", status: "needsAction", parent: "gt-ahmed" }, NOW.toISOString());
+  await upsertGoogleTaskMirror(d1, { id: "sub-2", title: "Sub 2", status: "needsAction", parent: "gt-ahmed" }, NOW.toISOString());
+  await upsertGoogleTaskMirror(d1, { id: "sub-3", title: "Sub 3", status: "needsAction", parent: "gt-ahmed" }, NOW.toISOString());
+  const detailSubs = await handleAssistantMessage({
+    db: d1, user, message: tapAction("task_open|gt-ahmed"), googleTasks, now: NOW
+  });
+  assert.match(responseText(detailSubs), /Subtasks \(3\)/);
+  assert.equal(detailSubs.actions.flat().some(b => b.action === "task_open|sub-3"), true);
+  assert.equal(detailSubs.actions.flat().some(b => b.action === "task_add_sub|gt-ahmed"), true);
+
+  const planView = await handleAssistantMessage({
+    db: d1, user, message: textMsg("/plan"), googleTasks, now: NOW
+  });
+  assert.match(responseText(planView), /Top move:/);
+  assert.equal(planView.actions.flat().some(b => b.action === "home_back"), true);
+  assert.equal(planView.actions.flat().some(b => b.action === "plan_tomorrow_easy"), true);
+
+  const easyTmrw = await handleAssistantMessage({
+    db: d1, user, message: tapAction("plan_tomorrow_easy"), googleTasks, now: NOW
+  });
+  assert.match(responseText(easyTmrw), /How to prep/i);
+
+  const hqBack = await handleAssistantMessage({
+    db: d1, user, message: tapAction("home_back"), googleTasks, now: NOW
+  });
+  assert.equal(hqBack.category, "HQ");
 
   sqlite.close();
 });
