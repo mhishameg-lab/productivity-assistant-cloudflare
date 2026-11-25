@@ -39,7 +39,7 @@ export function parseSleepTime(text, now = new Date()) {
     due = sleepDateTime(date, time);
     if (!due) return null;
   }
-  if (due.getTime() - now.getTime() > 14 * 60 * 60_000) return null;
+  if (due.getTime() - now.getTime() > 24 * 60 * 60_000) return null;
   return due;
 }
 
@@ -81,8 +81,8 @@ export async function endDive(db, userId, now) {
 export async function startSleep({ db, user, wakeAt, now }) {
   const wake = wakeAt instanceof Date ? wakeAt : new Date(wakeAt);
   if (Number.isNaN(wake.getTime()) || wake.getTime() <= now.getTime() ||
-      wake.getTime() - now.getTime() > 14 * 60 * 60_000) {
-    throw new RangeError("Wake time must be in the future and within 14 hours.");
+      wake.getTime() - now.getTime() > 24 * 60 * 60_000) {
+    throw new RangeError("Wake time must be in the future and within 24 hours.");
   }
   const id = `SLEEP-${crypto.randomUUID()}`;
   await db.prepare(

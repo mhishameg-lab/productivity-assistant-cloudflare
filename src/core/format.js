@@ -56,16 +56,18 @@ export function weekdayDay(dateOrKey) {
 }
 
 export function timeLabel(value) {
-  const date = value instanceof Date
-    ? value
-    : /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(value))
-      ? new Date(`1970-01-01T${value}:00Z`)
-      : toCairoDate(value);
-  const parts = value instanceof Date
-    ? cairoTimeParts(date)
-    : /^([01]\d|2[0-3]):([0-5]\d)$/.test(String(value))
-      ? { hour: String(date.getUTCHours()).padStart(2, "0"), minute: String(date.getUTCMinutes()).padStart(2, "0") }
-      : cairoTimeParts(date);
+  let parts;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) throw new TypeError("Time is invalid.");
+    parts = cairoTimeParts(value);
+  } else if (/^([01]\d|2[0-3]):([0-5]\d)$/.test(String(value))) {
+    const [hourStr, minuteStr] = String(value).split(":");
+    parts = { hour: hourStr, minute: minuteStr };
+  } else {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) throw new TypeError("Time is invalid.");
+    parts = cairoTimeParts(date);
+  }
   const hour = Number(parts.hour);
   const minute = Number(parts.minute);
   if (!Number.isInteger(hour) || !Number.isInteger(minute)) {

@@ -74,6 +74,11 @@ import {
 } from "../user-reminders.js";
 import { endDive, parseDiveDuration, parseSleepTime, startDive, startSleep } from "../companion.js";
 import { SCHEDULE } from "./schedule.js";
+import {
+  handleCaptureCallback,
+  handleCaptureConversationText,
+  routeMagicCapture
+} from "./magic-capture.js";
 
 export async function handleAssistantMessage({
   db,
@@ -83,6 +88,9 @@ export async function handleAssistantMessage({
   googleCalendar = null,
   googleGmail = null,
   naturalLanguageClassifier = null,
+  captureParser = null,
+  conversationResponder = null,
+  onBeforeAiCall = null,
   aiDailyPlanner = null,
   emailFollowUpAnalyzer = null,
   userRemindersEnabled = true,
@@ -135,7 +143,7 @@ export async function handleAssistantMessage({
   if (intent.type === "user_action") {
     return handleAction({
       db, user, message, intent, googleTasks, googleCalendar, googleGmail,
-      aiDailyPlanner, userRemindersEnabled, companionEnabled, now
+      aiDailyPlanner, conversationResponder, onBeforeAiCall, userRemindersEnabled, companionEnabled, now
     });
   }
 
@@ -144,6 +152,35 @@ export async function handleAssistantMessage({
   }
   if (intent.type === "unsupported_input") return null;
   if (intent.type === "user_message") {
+    const trimmedText = intent.text.trim();
+    if (/^(?:▶\s*Next|▶️?\s*Go)$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return beginFocusNow({ db, user, now });
+    }
+    if (/^🗓\s*Plan$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return showPlanForDate({
+        db, user, googleTasks, googleCalendar,
+        date: cairoDateKey(now), title: "Plan today", now
+      });
+    }
+    if (/^(?:➕\s*Add|📝\s*Drop\s*it)$/i.test(trimmedText)) {
+      return beginMagicDrop(db, user, now);
+    }
+    if (/^(?:📋\s*Today|📱\s*HQ)$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return showCalmHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
+    }
+    if (/^🧭\s*Where\s+I'?m\s+at$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return showWhereIAm({ db, user, now });
+    }
+    if (/^😴\s*Zzz$/i.test(trimmedText)) {
+      await clearConversationState(db, user.id);
+      return companionEnabled
+        ? showSleepPrompt(now)
+        : response("Rest mode unavailable", "Sleep and dive controls are paused right now.");
+    }
     const state = await getConversationState(db, user.id, now.toISOString());
     if (state) {
       if (!userRemindersEnabled && String(state.type).startsWith("reminder_")) {
@@ -152,58 +189,27 @@ export async function handleAssistantMessage({
       if (!companionEnabled && state.type === "sleep_time_custom") {
         return response("Rest mode unavailable", "Sleep and dive controls are paused right now.");
       }
+      if (String(state.type).startsWith("capture_")) {
+        const handled = await handleCaptureConversationText({
+          db,
+          user,
+          state,
+          text: trimmedText,
+          googleTasks,
+          googleCalendar,
+          captureParser,
+          conversationResponder,
+          onBeforeAiCall,
+          userRemindersEnabled,
+          companionEnabled,
+          createCapturedTaskFn: createCapturedTask,
+          now
+        });
+        if (handled) return handled;
+      }
       return handleConversationText({
         db, user, message, state, googleTasks, googleCalendar, aiDailyPlanner, now
       });
-    }
-    if (/^(?:going to sleep|goodnight|good night|نايم)$/iu.test(intent.text.trim())) {
-      return showSleepPrompt(now);
-    }
-    if (/^(?:leave me|heads down|سيبني)/iu.test(intent.text.trim())) {
-      const minutes = parseDiveDuration(intent.text);
-      if (!minutes) return {
-        category: "Dive",
-        title: "",
-        sections: [{ heading: "", lines: ["How long?"] }],
-        actions: [[
-          { label: "1 h", action: "dive_start|60" },
-          { label: "2 h", action: "dive_start|120" },
-          { label: "3 h", action: "dive_start|180" }
-        ]]
-      };
-      const until = await startDive({ db, user, minutes, now });
-      return {
-        category: "Dive",
-        title: "",
-        sections: [{ heading: "", lines: [`Bet. 🎧 I'm gone for ${durationLabel(minutes)}. I'll hit you at ${timeLabel(until)}.`] }],
-        actions: [[
-          { label: "I'm back", action: "back" },
-          { label: "+30 min", action: "dive_extend|30" }
-        ]]
-      };
-    }
-    if (/^(?:remind me|in \d|tomorrow at|on .+ at|\d{1,2}\/\d{1,2})/i.test(intent.text.trim())) {
-      return handleUserReminderCommand({
-        db,
-        user,
-        intent: { arguments: intent.text.trim() },
-        now
-      });
-    }
-    if (/^▶\s*Next$/i.test(intent.text.trim())) {
-      return showNextRecommendation({ db, user, now });
-    }
-    if (/^🗓\s*Plan$/i.test(intent.text.trim())) {
-      return showPlanForDate({
-        db, user, googleTasks, googleCalendar,
-        date: cairoDateKey(now), title: "Plan today", now
-      });
-    }
-    if (/^➕\s*Add$/i.test(intent.text.trim())) {
-      return beginTaskCapture(db, user, now);
-    }
-    if (/^📋\s*Today$/i.test(intent.text.trim())) {
-      return showHome({ db, user, googleTasks, googleCalendar, aiDailyPlanner, now });
     }
     const shortcut = parseTypedShortcut(intent.text);
     if (shortcut) {
@@ -216,16 +222,6 @@ export async function handleAssistantMessage({
         now
       });
     }
-    const quickTask = parseQuickCapture(intent.text, now);
-    if (quickTask) {
-      return createQuickCapturedTask({
-        db,
-        user,
-        googleTasks,
-        capture: quickTask,
-        now
-      });
-    }
     const availability = resolveAvailableTimeRequest(intent.text);
     if (availability) {
       return beginAvailableTimeRequest({
@@ -235,7 +231,7 @@ export async function handleAssistantMessage({
     const deterministicName = resolveDeterministicTextIntent(intent.text);
     if (deterministicName) {
       intent = { type: "command", name: deterministicName, arguments: "" };
-    } else if (naturalLanguageClassifier) {
+    } else if (!captureParser && naturalLanguageClassifier) {
       try {
         const name = await naturalLanguageClassifier(intent.text);
         if (name && name !== "unknown") {
@@ -249,10 +245,19 @@ export async function handleAssistantMessage({
       }
     }
     if (intent.type === "user_message") {
-      return response(
-        "Message",
-        "I couldn't safely match that request to an available action. Try a direct command or /help."
-      );
+      return routeMagicCapture({
+        db,
+        user,
+        text: trimmedText,
+        googleTasks,
+        googleCalendar,
+        captureParser,
+        conversationResponder,
+        onBeforeAiCall,
+        userRemindersEnabled,
+        companionEnabled,
+        now
+      });
     }
   }
 
@@ -267,7 +272,22 @@ export async function handleAssistantMessage({
     case "focus":
       return beginFocusNow({ db, user, now });
     case "drop":
-      return beginTaskCapture(db, user, now);
+      if (String(intent.arguments || "").trim()) {
+        return routeMagicCapture({
+          db,
+          user,
+          text: String(intent.arguments).trim(),
+          googleTasks,
+          googleCalendar,
+          captureParser,
+          conversationResponder,
+          onBeforeAiCall,
+          userRemindersEnabled,
+          companionEnabled,
+          now
+        });
+      }
+      return beginMagicDrop(db, user, now);
     case "wya":
       return showWhereIAm({ db, user, now });
     case "stack":
@@ -394,6 +414,8 @@ async function handleAction({
   googleCalendar,
   googleGmail,
   aiDailyPlanner,
+  conversationResponder = null,
+  onBeforeAiCall = null,
   userRemindersEnabled = true,
   companionEnabled = true,
   now
@@ -408,8 +430,23 @@ async function handleAction({
   )) {
     return response("Rest mode unavailable", "Sleep, dive, and check-in controls are paused right now.");
   }
-  if (!userRemindersEnabled && actionName.startsWith("reminder_")) {
+  if (!userRemindersEnabled && (actionName.startsWith("reminder_") || actionName === "cap_rem_time")) {
     return response("Reminders paused", "Reminder delivery is paused right now. Your saved reminder details were not changed.");
+  }
+  if (actionName.startsWith("cap_") || actionName === "reminder_undo" || actionName === "reminder_chg") {
+    return handleCaptureCallback({
+      db,
+      user,
+      identifier,
+      googleTasks,
+      googleCalendar,
+      createCapturedTaskFn: createCapturedTask,
+      conversationResponder,
+      onBeforeAiCall,
+      userRemindersEnabled,
+      companionEnabled,
+      now
+    });
   }
   if (identifier === "companion_stuck") {
     await db.prepare(
@@ -1095,7 +1132,7 @@ async function handleAction({
   if (outcomeStart) {
     const date = outcomeStart[1] || cairoDateKey(now);
     const area = outcomeStart[2];
-    if (!isValidDateKey(date)) return response("Invalid outcome date", "Choose a valid date and try again.");
+    if (!isValidDateKey(date)) return response("Pick a real date", "That date didn't work—try again.");
     const outcome = await getDailyOutcome(db, date, area);
     if (!outcome) {
       await setConversationState(db, user.id, {
@@ -1117,7 +1154,7 @@ async function handleAction({
   const focusDuration = identifier.match(/^focus_duration\|(\d{4}-\d{2}-\d{2})\|(DEEP|WORK|LIFE)\|(25|50)$/);
   if (focusDuration) {
     const [, date, area, duration] = focusDuration;
-    if (!isValidDateKey(date)) return response("Invalid outcome date", "Choose a valid date and try again.");
+    if (!isValidDateKey(date)) return response("Pick a real date", "That date didn't work—try again.");
     const state = await getConversationState(db, user.id, now.toISOString());
     if (!state || state.type !== "focus_duration" || state.date !== date || state.area !== area) {
       return response("Focus choice expired", "Start the outcome again to choose a focus block.");
@@ -1497,7 +1534,18 @@ async function handleAction({
     };
   }
 
-  return response("Unsupported action", "That action is not migrated yet.");
+  return response("Not ready yet", "That action isn't wired up yet. Try /hq.");
+}
+
+async function beginMagicDrop(db, user, now) {
+  await clearConversationState(db, user.id);
+  return {
+    category: "Capture",
+    title: "",
+    sections: [{ heading: "", lines: ["What's the move? Type it however you like."] }],
+    inputMode: "force_reply",
+    inputPlaceholder: "Call Ahmed tomorrow"
+  };
 }
 
 async function beginTaskCapture(db, user, now) {
@@ -1751,7 +1799,7 @@ async function handleGoalConversationText({ db, user, state, text, googleTasks, 
   if (state.type === "goal_deadline") {
     const deadline = text.toLowerCase() === "none" ? null : parseDateInput(text, now);
     if (text.toLowerCase() !== "none" && (!deadline || deadline < state.startDate)) {
-      return response("Invalid deadline", "Use 11/25/2026 or Nov 25 on or after the start date, or type none.");
+      return response("Pick a real date", "Use 11/25/2026 or Nov 25 on or after the start date, or type none.");
     }
     state.deadline = deadline;
     state.type = "goal_key_result";
@@ -3276,7 +3324,7 @@ async function showAiDailyPrioritySuggestion({
     return response("Suggestion expired", "Open today's plan to request a current recommendation.");
   }
   if (!aiDailyPlanner) {
-    return response("AI planning disabled", "The deterministic daily plan remains available; no AI request was made.");
+    return response("AI planning off", "Your normal daily plan is still ready; no AI call was made.");
   }
   if (!googleTasks) {
     return response("Google Tasks unavailable", "A current task sync is required; no recommendation was made.");
@@ -3300,13 +3348,13 @@ async function showAiDailyPrioritySuggestion({
     }));
     return response(
       "AI suggestion unavailable",
-      "I couldn't safely produce a recommendation. Your deterministic plan and Google Tasks are unchanged."
+      "Couldn't get a suggestion right now. Your plan and Google Tasks are untouched."
     );
   }
   if (taskIds === null) {
     return response(
       "AI suggestion unavailable",
-      "The AI usage or input limit was reached. Your deterministic plan and Google Tasks are unchanged."
+      "Hit the daily AI limit. Your normal plan and Google Tasks are untouched."
     );
   }
   if (!Array.isArray(taskIds)) {
@@ -3342,7 +3390,7 @@ function formatStoredAiDailyRecommendation(recommendation, date) {
             ? `Signal: ${formatTaskPriorityEvidence(task, date)}`
             : `Current Google Tasks status: ${task.status}`}`
         )
-        : ["No task was selected. Use the deterministic plan to choose your next action."]
+        : ["Nothing picked. Use your normal plan to pick the next move."]
     }, {
       heading: "",
       lines: [

@@ -45,7 +45,7 @@ const SUPPORTED_COMMANDS = new Set([
 
 const DETERMINISTIC_TEXT_ROUTES = [
   { intent: "hq", patterns: [/^(?:hq|where's my hq|show my hq)$/] },
-  { intent: "go", patterns: [/^(?:go|next move|what's next)$/] },
+  { intent: "go", patterns: [/^(?:go|next move)$/] },
   { intent: "wya", patterns: [/^(?:wya|where am i|where'?s my place|lost)$/] },
   { intent: "stack", patterns: [/^(?:show|list) (?:my )?(?:task )?stack$/] },
   { intent: "pipeline", patterns: [/^(?:what'?s our pipeline|how do you work|what do you do)$/] },

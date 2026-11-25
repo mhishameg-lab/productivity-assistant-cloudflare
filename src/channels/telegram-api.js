@@ -154,6 +154,13 @@ export function createTelegramApi(token, fetchImpl = fetch) {
         callback_query_id: callbackQueryId,
         ...(text ? { text } : {})
       });
+    },
+
+    sendChatAction(chatId, action = "typing") {
+      return this.call("sendChatAction", {
+        chat_id: chatId,
+        action
+      });
     }
   };
 }

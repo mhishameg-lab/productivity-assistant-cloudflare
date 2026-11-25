@@ -16,6 +16,8 @@ import {
 import { createGoogleGmailClient } from "./integrations/google-gmail.js";
 import { createGoogleTasksClient } from "./integrations/google-tasks.js";
 import { classifyNaturalLanguageIntent } from "./ai/intent-classifier.js";
+import { parseWithWorkersAi } from "./ai/capture-parser.js";
+import { generateConversationalReply } from "./ai/conversation-responder.js";
 import { prioritizeDailyTasks } from "./ai/daily-prioritizer.js";
 import { analyzeEmailFollowUps } from "./ai/email-followups.js";
 import { handleScheduledEvent } from "./scheduled.js";
@@ -247,6 +249,31 @@ export default {
         env.AI_ENABLED === "true" &&
         env.AI_FREE_PLAN_CONFIRMED === "true" &&
         Boolean(env.AI);
+      const captureParser = aiEnabled
+        ? ({ text, recentTurns, now: parseNow }) => parseWithWorkersAi({
+            db: env.DB,
+            ai: env.AI,
+            text,
+            recentTurns,
+            now: parseNow || now,
+            model: env.AI_MODEL || undefined,
+            dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
+          })
+        : null;
+      const conversationResponder = aiEnabled
+        ? ({ text, facts, recentTurns, now: replyNow }) => generateConversationalReply({
+            db: env.DB,
+            ai: env.AI,
+            text,
+            facts,
+            recentTurns,
+            now: replyNow || now,
+            model: env.AI_MODEL || undefined,
+            dailyNeuronLimit: env.AI_DAILY_NEURON_LIMIT || 5000
+          })
+        : null;
+      const onBeforeAiCall = () =>
+        telegram.sendChatAction(message.conversation.externalId, "typing").catch(() => {});
       const naturalLanguageClassifier = aiEnabled
         ? text => classifyNaturalLanguageIntent({
               db: env.DB,
@@ -290,6 +317,9 @@ export default {
         googleCalendar,
         googleGmail,
         naturalLanguageClassifier,
+        captureParser,
+        conversationResponder,
+        onBeforeAiCall,
         aiDailyPlanner,
         emailFollowUpAnalyzer,
         userRemindersEnabled: env.USER_REMINDERS_ENABLED === "true",

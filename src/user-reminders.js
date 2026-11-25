@@ -185,7 +185,7 @@ export async function processUserReminders({ db, telegram, now, authorizedTelegr
           { label: "⏰ +15 min", action: `reminder_snooze|${claimed.id}|15` }
         ], [
           { label: "⏰ +1 hour", action: `reminder_snooze|${claimed.id}|60` },
-          { label: "📝 Make it a task", action: `reminder_task|${claimed.id}` }
+          { label: "📝 Make task", action: `reminder_task|${claimed.id}` }
         ]]
       });
       await db.prepare(
